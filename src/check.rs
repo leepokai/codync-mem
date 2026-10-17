@@ -17,6 +17,8 @@ pub enum Refusal {
     Secret,
     /// The user deleted this memory before.
     Forgotten,
+    /// The layer already holds this memory.
+    Duplicate,
     /// The layer is at its cap.
     Full,
 }
@@ -31,6 +33,7 @@ impl Refusal {
             Self::Instruction => "Memory holds facts about the user, not instructions to an assistant.",
             Self::Secret => "Passwords, keys, ID numbers and card or account numbers are never stored.",
             Self::Forgotten => "The user deleted this memory before, so it isn't saved again.",
+            Self::Duplicate => "Memory already has this.",
             Self::Full => "This memory layer is full. Revise or archive an entry first.",
         }
     }

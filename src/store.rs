@@ -141,25 +141,41 @@ pub fn cap(bot: Option<&str>) -> usize {
 }
 
 pub fn add(conn: &Connection, writer: Writer<'_>, new: New<'_>, now: i64, rev: i64) -> Result<Entry> {
+    admissible(conn, writer, new.bot, new.text)?;
     let text = new.text.trim();
-    if text.is_empty() {
-        return Err(Refusal::Empty.into());
-    }
-    if writer != Writer::User {
-        check::text(text)?;
-        if forgotten(conn, new.bot, text)? {
-            return Err(Refusal::Forgotten.into());
-        }
-        if used(conn, new.bot)? + tokens::estimate(text) > cap(new.bot) {
-            return Err(Refusal::Full.into());
-        }
-    }
     conn.execute(
         "INSERT INTO memory_entries (bot, state, text, author, author_bot, room, evidence, created_at, updated_at, rev)
          VALUES (?1, 'active', ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
         params![new.bot, text, author_name(writer.author()), writer.bot(), new.room, new.evidence.join(","), now, rev],
     )?;
     get(conn, conn.last_insert_rowid())?.ok_or(Error::NotFound)
+}
+
+/// Whether [`add`] would take `text` into a layer (`None`: "yours") from `writer`; nothing is written. Lets a
+/// caller refuse at once what it would only write later, such as a bot's proposal waiting for the user.
+pub fn admissible(conn: &Connection, writer: Writer<'_>, bot: Option<&str>, text: &str) -> Result<()> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(Refusal::Empty.into());
+    }
+    if writer != Writer::User {
+        match check::text(text) {
+            // Moved memory was written under older, looser limits; it stays whole.
+            Err(Refusal::TooLong) if writer == Writer::Import => {}
+            checked => checked?,
+        }
+        if forgotten(conn, bot, text)? {
+            return Err(Refusal::Forgotten.into());
+        }
+        if duplicate(conn, bot, text)? {
+            return Err(Refusal::Duplicate.into());
+        }
+    }
+    // An import may run past the cap: the opening takes what fits, and the importer archives the rest.
+    if matches!(writer, Writer::Bot(_) | Writer::Dream(_)) && used(conn, bot)? + tokens::estimate(text) > cap(bot) {
+        return Err(Refusal::Full.into());
+    }
+    Ok(())
 }
 
 pub fn revise(conn: &Connection, writer: Writer<'_>, id: i64, text: &str, now: i64, rev: i64) -> Result<Entry> {
@@ -228,6 +244,16 @@ pub fn forget(conn: &Connection, id: i64) -> Result<Entry> {
     Ok(entry)
 }
 
+/// Keeps `text` out of a layer (`None`: "yours") for bots and dreaming, as if it had been forgotten: the user
+/// declined it.
+pub fn forbid(conn: &Connection, bot: Option<&str>, text: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO memory_tombstones (scope, hash) VALUES (?1, ?2)",
+        params![scope(bot), fingerprint(text)],
+    )?;
+    Ok(())
+}
+
 /// Forgets every entry in one layer (`None`: "yours"). Returns what was deleted.
 pub fn forget_layer(conn: &Connection, bot: Option<&str>) -> Result<Vec<Entry>> {
     let entries = layer(conn, bot)?;
@@ -236,6 +262,19 @@ pub fn forget_layer(conn: &Connection, bot: Option<&str>) -> Result<Vec<Entry>> 
     }
     conn.execute("DELETE FROM memory_entries WHERE bot IS ?1", [bot])?;
     Ok(entries)
+}
+
+/// Removes what was kept for a deleted bot: its own layer, its tombstones and its dream log. What it wrote to
+/// "yours" stays, since the user may still want it.
+pub fn drop_bot(conn: &Connection, bot: &str) -> Result<()> {
+    conn.execute("DELETE FROM memory_entries WHERE bot = ?1", [bot])?;
+    conn.execute("DELETE FROM memory_tombstones WHERE scope = ?1", [scope(Some(bot))])?;
+    conn.execute(
+        "DELETE FROM memory_dream_changes WHERE dream IN (SELECT id FROM memory_dreams WHERE bot = ?1)",
+        [bot],
+    )?;
+    conn.execute("DELETE FROM memory_dreams WHERE bot = ?1", [bot])?;
+    Ok(())
 }
 
 pub fn get(conn: &Connection, id: i64) -> Result<Option<Entry>> {
@@ -295,6 +334,18 @@ fn set_state(
         params![id, state_name(state), superseded_by, now, rev],
     )?;
     get(conn, id)?.ok_or(Error::NotFound)
+}
+
+fn duplicate(conn: &Connection, bot: Option<&str>, text: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT text FROM memory_entries WHERE bot IS ?1")?;
+    let texts = stmt.query_map([bot], |row| row.get::<_, String>(0))?;
+    let wanted = fingerprint(text);
+    for existing in texts {
+        if fingerprint(&existing?) == wanted {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn forgotten(conn: &Connection, bot: Option<&str>, text: &str) -> Result<bool> {
@@ -445,6 +496,16 @@ mod tests {
         let found: Vec<String> = search(&conn, "a", "PEANUT", 10).unwrap().into_iter().map(|e| e.text).collect();
         assert_eq!(found, ["Allergic to Peanuts", "Uses peanut butter in recipes"]);
         assert!(search(&conn, "a", "100%", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_bot_cant_write_what_the_layer_already_holds() {
+        let conn = db();
+        add(&conn, Writer::User, new(Some("a"), "Likes tea"), 1, 1).unwrap();
+        let again = add(&conn, Writer::Bot("a"), new(Some("a"), "likes  TEA."), 2, 2);
+        assert!(matches!(again, Err(Error::Refused(Refusal::Duplicate))));
+        assert!(admissible(&conn, Writer::Bot("a"), Some("a"), "Likes coffee").is_ok());
+        assert!(admissible(&conn, Writer::Bot("a"), Some("a"), "my password is 1234").is_err());
     }
 
     #[test]
