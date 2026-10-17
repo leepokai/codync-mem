@@ -5,6 +5,7 @@
 //! caller's transaction, so a memory change and whatever the caller records with it commit together.
 
 pub mod check;
+pub mod compaction;
 pub mod dream;
 pub mod evidence;
 pub mod opening;
