@@ -105,7 +105,7 @@ mod tests {
         assert!(!text.contains("Old fact") && !text.contains("Other bot's"));
 
         let alone = load(&conn, "a", false).unwrap();
-        assert!(alone.yours.is_empty());
+        assert_eq!(alone.yours, [] as [Entry; 0]);
         assert!(!alone.render().contains("shared with"));
     }
 }

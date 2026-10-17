@@ -495,7 +495,7 @@ mod tests {
         add(&conn, Writer::User, new(Some("b"), "Peanut farm visit"), 4, 4).unwrap();
         let found: Vec<String> = search(&conn, "a", "PEANUT", 10).unwrap().into_iter().map(|e| e.text).collect();
         assert_eq!(found, ["Allergic to Peanuts", "Uses peanut butter in recipes"]);
-        assert!(search(&conn, "a", "100%", 10).unwrap().is_empty());
+        assert_eq!(search(&conn, "a", "100%", 10).unwrap(), [] as [Entry; 0]);
     }
 
     #[test]
@@ -515,7 +515,7 @@ mod tests {
         add(&conn, Writer::User, new(Some("a"), "Bot fact"), 2, 2).unwrap();
         assert_eq!(forget_layer(&conn, Some("a")).unwrap().len(), 1);
         assert_eq!(layer(&conn, None).unwrap().len(), 1);
-        assert!(layer(&conn, Some("a")).unwrap().is_empty());
+        assert_eq!(layer(&conn, Some("a")).unwrap(), [] as [Entry; 0]);
         assert_eq!(changed_since(&conn, 0).unwrap().len(), 1);
     }
 }

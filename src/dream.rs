@@ -588,7 +588,7 @@ mod tests {
         let raw = "Sure!\n```json\n{\"add\": [{\"text\": \"Likes tea\", \"quote\": \"I like tea a lot\", \"message\": \"m1\"}]}\n```";
         let plan = parse(raw).unwrap();
         assert_eq!(plan.add[0].text, "Likes tea");
-        assert!(plan.archive.is_empty());
+        assert_eq!(plan.archive, [] as [Archive; 0]);
         assert_eq!(parse("no json here"), None);
     }
 
