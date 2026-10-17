@@ -380,10 +380,10 @@ impl Index {
     /// are marked, never cut.
     pub fn render(&self, folder: impl Fn(Option<&str>) -> String) -> String {
         let mut lines = vec![
-            "Long-form memory: Markdown notes, one topic each, for detail too long for the entries above. Read a note \
-             when its topic comes up, with your file tools or read_memory, and keep it current with your file tools \
-             or edit_memory. Each starts with frontmatter whose description: line says when to read it; file names \
-             are lowercase-with-dashes.md."
+            "Long-form memory: Markdown notes, one topic each, for detail too long for the entries above (lists, \
+             itineraries, histories). Read a note when its topic comes up, with your file tools or read_memory, and \
+             keep it current with your file tools or edit_memory. Each starts with frontmatter whose description: \
+             line says when to read it; file names are lowercase-with-dashes.md."
                 .to_owned(),
         ];
         if let Some(yours) = &self.yours {
