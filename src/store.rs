@@ -264,15 +264,18 @@ pub fn forget_layer(conn: &Connection, bot: Option<&str>) -> Result<Vec<Entry>> 
     Ok(entries)
 }
 
-/// Removes what was kept for a deleted bot: its own layer, its tombstones and its dream log. What it wrote to
-/// "yours" stays, since the user may still want it.
+/// Removes what was kept for a deleted bot: its own layer and files, its tombstones and its dream log. What it
+/// wrote to "yours" stays, since the user may still want it.
 pub fn drop_bot(conn: &Connection, bot: &str) -> Result<()> {
+    crate::files::forget_layer(conn, Some(bot))?;
     conn.execute("DELETE FROM memory_entries WHERE bot = ?1", [bot])?;
     conn.execute("DELETE FROM memory_tombstones WHERE scope = ?1", [scope(Some(bot))])?;
-    conn.execute(
-        "DELETE FROM memory_dream_changes WHERE dream IN (SELECT id FROM memory_dreams WHERE bot = ?1)",
-        [bot],
-    )?;
+    for table in ["memory_dream_changes", "memory_dream_files"] {
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE dream IN (SELECT id FROM memory_dreams WHERE bot = ?1)"),
+            [bot],
+        )?;
+    }
     conn.execute("DELETE FROM memory_dreams WHERE bot = ?1", [bot])?;
     Ok(())
 }

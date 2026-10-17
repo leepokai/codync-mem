@@ -38,6 +38,37 @@ const MIGRATIONS: &[&str] = &[
         change TEXT NOT NULL
     );
     CREATE INDEX memory_dream_changes_dream ON memory_dream_changes (dream);",
+    // 2: long-form files (the layer's key is '' for the shared one), their versions, and the ones dreaming wrote.
+    "CREATE TABLE memory_files (
+        bot TEXT NOT NULL,
+        name TEXT NOT NULL,
+        hash TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        mtime INTEGER NOT NULL,
+        description TEXT,
+        tokens INTEGER NOT NULL,
+        version INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        rev INTEGER NOT NULL,
+        PRIMARY KEY (bot, name)
+    ) WITHOUT ROWID;
+    CREATE TABLE memory_file_versions (
+        id INTEGER PRIMARY KEY,
+        bot TEXT NOT NULL,
+        name TEXT NOT NULL,
+        content TEXT,
+        author TEXT NOT NULL,
+        author_bot TEXT,
+        cause TEXT NOT NULL,
+        at INTEGER NOT NULL,
+        rev INTEGER NOT NULL
+    );
+    CREATE INDEX memory_file_versions_file ON memory_file_versions (bot, name, id);
+    CREATE TABLE memory_dream_files (
+        dream INTEGER NOT NULL,
+        version INTEGER NOT NULL
+    );
+    CREATE INDEX memory_dream_files_dream ON memory_dream_files (dream);",
 ];
 
 /// Brings the crate's tables up to date. Safe to call on every start.

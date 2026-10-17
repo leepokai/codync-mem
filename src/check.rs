@@ -21,6 +21,10 @@ pub enum Refusal {
     Duplicate,
     /// The layer is at its cap.
     Full,
+    /// A long-form memory file without the `description:` line its index entry comes from.
+    NoDescription,
+    /// A long-form memory file past its cap.
+    FileTooLong,
 }
 
 impl Refusal {
@@ -35,6 +39,12 @@ impl Refusal {
             Self::Forgotten => "The user deleted this memory before, so it isn't saved again.",
             Self::Duplicate => "Memory already has this.",
             Self::Full => "This memory layer is full. Revise or archive an entry first.",
+            Self::NoDescription => {
+                "A memory file starts with frontmatter whose description: line says when to read it."
+            }
+            Self::FileTooLong => {
+                "A memory file holds at most 2,000 tokens. Shorten it or move a topic to its own file."
+            }
         }
     }
 }
@@ -56,6 +66,11 @@ pub fn text(text: &str) -> Result<(), Refusal> {
     if tokens::estimate(text) > tokens::ENTRY_CAP {
         return Err(Refusal::TooLong);
     }
+    content(text)
+}
+
+/// The checks on what memory says, whatever its length: hidden text, prompt links, planted instructions, secrets.
+pub fn content(text: &str) -> Result<(), Refusal> {
     if text.chars().any(hidden) {
         return Err(Refusal::HiddenCharacters);
     }
@@ -94,7 +109,7 @@ fn hidden(ch: char) -> bool {
     matches!(u32::from(ch),
         0x00AD | 0x180E | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0x2066..=0x2069 | 0xFEFF
         | 0xE_0000..=0xE_007F)
-        || (ch.is_control() && ch != '\n' && ch != '\t')
+        || (ch.is_control() && !matches!(ch, '\n' | '\t' | '\r'))
 }
 
 fn prompt_link(lower: &str) -> bool {

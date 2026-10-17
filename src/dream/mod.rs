@@ -3,13 +3,18 @@
 //! own words, and every run is logged and can be undone.
 //!
 //! The caller runs the model: [`prompt`] gives it the job, [`parse`] reads the answer, [`audit`] keeps what the
-//! rules allow and [`apply`] writes it in the caller's transaction.
+//! rules allow and [`apply`] writes it in the caller's transaction. Notes for long-form files ([`notes`]) are the
+//! caller's to append, logged with [`record_file`].
+
+mod notes;
+pub use notes::{Append, MoveOut, NOTE_CAP, Note, notes};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::check;
 use crate::evidence;
+use crate::files;
 use crate::store::{self, Author, Entry, Error, New, State, Writer};
 
 /// The most changes one run proposes; later ones wait for the next run.
@@ -35,6 +40,10 @@ pub struct Snapshot {
     pub shared: bool,
     /// Active entries the bot sees.
     pub entries: Vec<Entry>,
+    /// The long-form files the bot sees.
+    pub files: Vec<files::File>,
+    /// A layer the bot sees is nine-tenths full, so entries may move out to files.
+    pub full: bool,
     /// `YYYY-MM-DD`.
     pub today: String,
     stamp: Vec<(i64, i64)>,
@@ -46,7 +55,19 @@ pub fn snapshot(conn: &Connection, bot: &str, shared: bool, today: &str) -> stor
         entries.extend(store::layer(conn, None)?);
     }
     entries.retain(|e| e.state == State::Active);
-    Ok(Snapshot { bot: bot.to_owned(), shared, entries, today: today.to_owned(), stamp: stamp(conn, bot)? })
+    let index = files::index(conn, bot, shared)?;
+    let nearly =
+        |layer: Option<&str>| -> store::Result<bool> { Ok(store::used(conn, layer)? * 10 >= store::cap(layer) * 9) };
+    let full = nearly(Some(bot))? || (shared && nearly(None)?);
+    Ok(Snapshot {
+        bot: bot.to_owned(),
+        shared,
+        entries,
+        files: index.yours.unwrap_or_default().into_iter().chain(index.bot).collect(),
+        full,
+        today: today.to_owned(),
+        stamp: stamp(conn, bot)?,
+    })
 }
 
 /// Every entry's id and rev in the layers a bot sees: if any changes during a run, the run is dropped.
@@ -83,13 +104,24 @@ turn relative dates into absolute ones.
 - If an entry describes something in the future whose date has passed, put it in \"review\" with the fact \
 rewritten in the past tense.
 - {shared}
+- Detail that matters only when its topic comes up (a person's story, a health history, a trip's plan) goes in \
+\"append\": one line for a long-form file, cited like an add. Name files by topic, lowercase-with-dashes.md; a \
+new file needs a \"description\" saying when to read it.{move_out}
 - At most {MAX_CHANGES} changes. If nothing should change, output empty lists.
 
 Output only one JSON object:
 {{\"add\": [{{\"text\": \"...\", \"shared\": false, \"quote\": \"...\", \"message\": \"m3\"}}], \
 \"archive\": [{{\"id\": 12, \"quote\": \"...\", \"message\": \"m4\", \"replacedBy\": 0}}], \
-\"review\": [{{\"id\": 7, \"text\": \"...\"}}]}}",
+\"review\": [{{\"id\": 7, \"text\": \"...\"}}], \
+\"append\": [{{\"file\": \"people.md\", \"shared\": false, \"text\": \"...\", \"quote\": \"...\", \"message\": \"m5\", \"description\": \"...\"}}]{move_shape}}}",
         today = snapshot.today,
+        move_out = if snapshot.full {
+            "\n- Memory is nearly full: \"moveOut\" moves an entry the user didn't write into a long-form file, as a line \
+there, when it is detail rather than something every reply needs."
+        } else {
+            ""
+        },
+        move_shape = if snapshot.full { ", \"moveOut\": [{\"id\": 9, \"file\": \"health.md\", \"description\": \"...\"}]" } else { "" },
     );
     let memory = if snapshot.entries.is_empty() {
         "(empty)".to_owned()
@@ -105,6 +137,19 @@ Output only one JSON object:
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let files = if snapshot.files.is_empty() {
+        "(none)".to_owned()
+    } else {
+        snapshot
+            .files
+            .iter()
+            .map(|f| {
+                let layer = if f.bot.is_none() { "shared" } else { "this bot" };
+                format!("- {} ({layer}): {}", f.name, f.description.as_deref().unwrap_or("no description"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     let conversations = messages
         .iter()
         .enumerate()
@@ -114,7 +159,12 @@ Output only one JSON object:
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    (system, format!("Memory now:\n{memory}\n\nConversations since the last review, oldest first:\n\n{conversations}"))
+    (
+        system,
+        format!(
+            "Memory now:\n{memory}\n\nLong-form files now:\n{files}\n\nConversations since the last review, oldest first:\n\n{conversations}"
+        ),
+    )
 }
 
 /// What the model proposed.
@@ -126,6 +176,10 @@ pub struct Plan {
     pub archive: Vec<Archive>,
     #[serde(default)]
     pub review: Vec<Review>,
+    #[serde(default)]
+    pub append: Vec<Append>,
+    #[serde(default, rename = "moveOut")]
+    pub move_out: Vec<MoveOut>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -159,7 +213,11 @@ pub struct Review {
 
 impl Plan {
     pub fn is_empty(&self) -> bool {
-        self.add.is_empty() && self.archive.is_empty() && self.review.is_empty()
+        self.add.is_empty()
+            && self.archive.is_empty()
+            && self.review.is_empty()
+            && self.append.is_empty()
+            && self.move_out.is_empty()
     }
 }
 
@@ -173,25 +231,7 @@ pub fn parse(raw: &str) -> Option<Plan> {
 /// Keeps the changes the rules allow. The second value lists why the others were dropped.
 pub fn audit(snapshot: &Snapshot, messages: &[Message], plan: Plan) -> (Plan, Vec<String>) {
     let mut rejected = Vec::new();
-    let cited = |quote: &str, label: &str| -> Result<&Message, &'static str> {
-        let message = label
-            .trim()
-            .strip_prefix('m')
-            .and_then(|n| n.parse::<usize>().ok())
-            .and_then(|n| n.checked_sub(1))
-            .and_then(|i| messages.get(i))
-            .ok_or("it cites no message")?;
-        if !message.from_user {
-            return Err("it quotes the bot, not the user");
-        }
-        if !evidence::quoted(quote, &message.text) {
-            return Err("the quote isn't in the user's own words");
-        }
-        if !evidence::substantive(quote) {
-            return Err("the quote is too short to carry a memory");
-        }
-        Ok(message)
-    };
+    let cited = |quote: &str, label: &str| cite(messages, quote, label);
     let changeable = |id: i64| -> Result<&Entry, &'static str> {
         let entry = snapshot.entries.iter().find(|e| e.id == id).ok_or("no such active entry")?;
         if entry.author == Author::User {
@@ -248,12 +288,15 @@ pub fn audit(snapshot: &Snapshot, messages: &[Message], plan: Plan) -> (Plan, Ve
     kept.add.truncate(take(kept.add.len()));
     kept.archive.truncate(take(kept.archive.len()));
     kept.review.truncate(take(kept.review.len()));
+    notes::audit(snapshot, messages, plan.append, plan.move_out, &mut kept, &mut rejected);
+    kept.append.truncate(take(kept.append.len()));
+    kept.move_out.truncate(take(kept.move_out.len()));
     let added = kept.add.len();
     for archive in &mut kept.archive {
         archive.replaced_by = archive.replaced_by.filter(|&i| i < added);
     }
 
-    let archiving = kept.archive.len() + kept.review.len();
+    let archiving = kept.archive.len() + kept.review.len() + kept.move_out.len();
     let allowed = (snapshot.entries.len() / 4).max(1);
     if archiving > allowed {
         rejected.push(format!(
@@ -263,6 +306,27 @@ pub fn audit(snapshot: &Snapshot, messages: &[Message], plan: Plan) -> (Plan, Ve
         return (Plan::default(), rejected);
     }
     (kept, rejected)
+}
+
+/// The user's message a change cites, when the quote is in their own words.
+fn cite<'a>(messages: &'a [Message], quote: &str, label: &str) -> Result<&'a Message, &'static str> {
+    let message = label
+        .trim()
+        .strip_prefix('m')
+        .and_then(|n| n.parse::<usize>().ok())
+        .and_then(|n| n.checked_sub(1))
+        .and_then(|i| messages.get(i))
+        .ok_or("it cites no message")?;
+    if !message.from_user {
+        return Err("it quotes the bot, not the user");
+    }
+    if !evidence::quoted(quote, &message.text) {
+        return Err("the quote isn't in the user's own words");
+    }
+    if !evidence::substantive(quote) {
+        return Err("the quote is too short to carry a memory");
+    }
+    Ok(message)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -328,6 +392,11 @@ pub fn apply(
             store::link(conn, old, new)?;
         }
     }
+    for moved in &plan.move_out {
+        if let Some(entry) = skip(store::archive(conn, writer, moved.id, None, now, rev))? {
+            record(entry.id, "archived")?;
+        }
+    }
     for review in &plan.review {
         let Some(old) = store::get(conn, review.id)? else { continue };
         if skip(store::archive(conn, writer, old.id, None, now, rev))?.is_none() {
@@ -347,7 +416,10 @@ pub fn apply(
         }
     }
     match get(conn, dream)? {
-        Some(dream) if !dream.added.is_empty() || !dream.archived.is_empty() => Ok(Outcome::Changed(dream)),
+        // File notes are the caller's to write, after this.
+        Some(dream) if !dream.added.is_empty() || !dream.archived.is_empty() || !plan.append.is_empty() => {
+            Ok(Outcome::Changed(dream))
+        }
         _ => {
             conn.execute("DELETE FROM memory_dreams WHERE id = ?1", [dream])?;
             Ok(Outcome::Unchanged)
@@ -371,6 +443,16 @@ pub struct Dream {
     pub undone: bool,
     pub added: Vec<Change>,
     pub archived: Vec<Change>,
+    /// The file versions it wrote.
+    pub files: Vec<FileChange>,
+}
+
+/// A long-form file a run appended to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FileChange {
+    pub name: String,
+    pub shared: bool,
+    pub version: i64,
 }
 
 /// An entry a run added or archived. Entries the user forgot since are left out.
@@ -393,14 +475,37 @@ pub fn get(conn: &Connection, id: i64) -> store::Result<Option<Dream>> {
         "SELECT c.change, e.id, e.text FROM memory_dream_changes c JOIN memory_entries e ON e.id = c.entry
          WHERE c.dream = ?1 ORDER BY e.id",
     )?;
-    let mut dream = Dream { id, bot, at, undone, added: Vec::new(), archived: Vec::new() };
+    let mut dream = Dream { id, bot, at, undone, added: Vec::new(), archived: Vec::new(), files: Vec::new() };
     for row in
         stmt.query_map([id], |row| Ok((row.get::<_, String>(0)?, Change { id: row.get(1)?, text: row.get(2)? })))?
     {
         let (kind, change) = row?;
         if kind == "added" { dream.added.push(change) } else { dream.archived.push(change) }
     }
+    let mut stmt = conn.prepare(
+        "SELECT v.name, v.bot = '', v.id FROM memory_dream_files d JOIN memory_file_versions v ON v.id = d.version
+         WHERE d.dream = ?1 ORDER BY v.id",
+    )?;
+    for row in
+        stmt.query_map([id], |row| Ok(FileChange { name: row.get(0)?, shared: row.get(1)?, version: row.get(2)? }))?
+    {
+        dream.files.push(row?);
+    }
     Ok(Some(dream))
+}
+
+/// Logs a file version a run's note wrote.
+pub fn record_file(conn: &Connection, dream: i64, version: i64) -> store::Result<()> {
+    conn.execute("INSERT INTO memory_dream_files (dream, version) VALUES (?1, ?2)", params![dream, version])?;
+    Ok(())
+}
+
+/// Drops a run that, once its notes were written or failed, changed nothing.
+pub fn discard_if_empty(conn: &Connection, dream: i64) -> store::Result<()> {
+    if get(conn, dream)?.is_some_and(|d| d.added.is_empty() && d.archived.is_empty() && d.files.is_empty()) {
+        conn.execute("DELETE FROM memory_dreams WHERE id = ?1", [dream])?;
+    }
+    Ok(())
 }
 
 /// The bot's latest runs, newest first.
@@ -412,7 +517,8 @@ pub fn recent(conn: &Connection, bot: &str, limit: usize) -> store::Result<Vec<D
     ids.into_iter().filter_map(|id| get(conn, id).transpose()).collect()
 }
 
-/// Reverses a run: what it added is forgotten (so it isn't learned again), what it archived comes back.
+/// Reverses a run: what it added is forgotten (so it isn't learned again), what it archived comes back. The files
+/// it appended to are the caller's to put back (`Dream::files`).
 pub fn undo(conn: &Connection, id: i64, now: i64, rev: i64) -> store::Result<Dream> {
     let dream = get(conn, id)?.ok_or(Error::NotFound)?;
     if dream.undone {
@@ -431,176 +537,4 @@ pub fn undo(conn: &Connection, id: i64, now: i64, rev: i64) -> store::Result<Dre
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::schema::migrate(&conn).unwrap();
-        conn
-    }
-
-    fn user(id: &str, text: &str) -> Message {
-        Message { id: id.into(), from_user: true, text: vec![text.into()], date: "2026-10-17".into() }
-    }
-
-    fn bot_reply(id: &str, text: &str) -> Message {
-        Message { id: id.into(), from_user: false, text: vec![text.into()], date: "2026-10-17".into() }
-    }
-
-    fn add(text: &str, quote: &str, message: &str) -> Add {
-        Add { text: text.into(), shared: false, quote: quote.into(), message: message.into() }
-    }
-
-    fn seed(conn: &Connection, writer: Writer<'_>, text: &str) -> Entry {
-        store::add(conn, writer, New { bot: Some("a"), text, room: None, evidence: &[] }, 1, 1).unwrap()
-    }
-
-    #[test]
-    fn keeps_only_changes_backed_by_the_users_own_words() {
-        let conn = db();
-        let snapshot = snapshot(&conn, "a", false, "2026-10-17").unwrap();
-        let messages = [
-            user("u1", "I moved to Tainan last month"),
-            bot_reply("b1", "Noted that you love durian"),
-            user("u2", "yes"),
-        ];
-        let plan = Plan {
-            add: vec![
-                add("Lives in Tainan", "I moved to Tainan", "m1"),
-                add("Loves durian", "you love durian", "m2"),
-                add("Agreed to something", "yes", "m3"),
-                add("Made up", "never said this", "m1"),
-                add("Password is hunter22", "I moved to Tainan", "m1"),
-            ],
-            ..Plan::default()
-        };
-        let (kept, rejected) = audit(&snapshot, &messages, plan);
-        assert_eq!(kept.add.iter().map(|a| a.text.as_str()).collect::<Vec<_>>(), ["Lives in Tainan"]);
-        assert_eq!(rejected.len(), 4);
-        let Outcome::Changed(dream) = apply(&conn, &snapshot, &kept, &messages, 5, 5).unwrap() else { panic!() };
-        assert_eq!(dream.added[0].text, "Lives in Tainan");
-        let entry = store::get(&conn, dream.added[0].id).unwrap().unwrap();
-        assert_eq!((entry.author, entry.evidence), (Author::Dream, vec!["u1".to_owned()]));
-    }
-
-    #[test]
-    fn never_archives_the_users_words_or_more_than_a_quarter() {
-        let conn = db();
-        let mine = seed(&conn, Writer::User, "Lives in Taipei");
-        let others: Vec<Entry> = (0..7).map(|i| seed(&conn, Writer::Bot("a"), &format!("Fact number {i}"))).collect();
-        let snapshot = snapshot(&conn, "a", false, "2026-10-17").unwrap();
-        let messages = [user("u1", "forget all of those old facts please")];
-        let archive =
-            |id| Archive { id, quote: "forget all of those old facts".into(), message: "m1".into(), replaced_by: None };
-
-        let (kept, rejected) = audit(&snapshot, &messages, Plan { archive: vec![archive(mine.id)], ..Plan::default() });
-        assert!(kept.is_empty() && rejected[0].contains("the user wrote it"));
-
-        let three = others.iter().take(3).map(|e| archive(e.id)).collect();
-        let (kept, rejected) = audit(&snapshot, &messages, Plan { archive: three, ..Plan::default() });
-        assert!(kept.is_empty() && rejected.last().unwrap().contains("more than a quarter"));
-
-        let two = others.iter().take(2).map(|e| archive(e.id)).collect();
-        let (kept, _) = audit(&snapshot, &messages, Plan { archive: two, ..Plan::default() });
-        assert_eq!(kept.archive.len(), 2);
-    }
-
-    #[test]
-    fn a_replacement_links_the_old_entry_and_undo_reverses_the_run() {
-        let conn = db();
-        let old = seed(&conn, Writer::Bot("a"), "Lives in Taipei");
-        let snapshot = snapshot(&conn, "a", false, "2026-10-17").unwrap();
-        let messages = [user("u1", "We just moved to Tainan for good")];
-        let plan = Plan {
-            add: vec![add("Lives in Tainan", "just moved to Tainan", "m1")],
-            archive: vec![Archive {
-                id: old.id,
-                quote: "We just moved to Tainan".into(),
-                message: "m1".into(),
-                replaced_by: Some(0),
-            }],
-            ..Plan::default()
-        };
-        let (kept, _) = audit(&snapshot, &messages, plan);
-        let Outcome::Changed(dream) = apply(&conn, &snapshot, &kept, &messages, 5, 5).unwrap() else { panic!() };
-        let archived = store::get(&conn, old.id).unwrap().unwrap();
-        assert_eq!(archived.state, State::Archived);
-        assert_eq!(archived.superseded_by, Some(dream.added[0].id));
-        assert_eq!(recent(&conn, "a", 5).unwrap(), std::slice::from_ref(&dream));
-
-        let undone = undo(&conn, dream.id, 6, 6).unwrap();
-        assert!(undone.undone);
-        assert_eq!(store::get(&conn, old.id).unwrap().unwrap().state, State::Active);
-        assert!(store::get(&conn, dream.added[0].id).unwrap().is_none());
-        // Forgotten by the undo, so the next run can't add it again.
-        let again = store::add(
-            &conn,
-            Writer::Dream("a"),
-            New { bot: Some("a"), text: "Lives in Tainan", room: None, evidence: &[] },
-            7,
-            7,
-        );
-        assert!(matches!(again, Err(Error::Refused(check::Refusal::Forgotten))));
-    }
-
-    #[test]
-    fn a_run_is_dropped_when_the_user_edited_memory_meanwhile() {
-        let conn = db();
-        let entry = seed(&conn, Writer::Bot("a"), "Likes tea");
-        let snapshot = snapshot(&conn, "a", false, "2026-10-17").unwrap();
-        store::revise(&conn, Writer::User, entry.id, "Likes green tea", 2, 2).unwrap();
-        let messages = [user("u1", "my daughter turns six in May")];
-        let (kept, _) = audit(
-            &snapshot,
-            &messages,
-            Plan { add: vec![add("Daughter turns 6 in May", "my daughter turns six", "m1")], ..Plan::default() },
-        );
-        assert_eq!(apply(&conn, &snapshot, &kept, &messages, 3, 3).unwrap(), Outcome::Stale);
-    }
-
-    #[test]
-    fn reviews_rewrite_dated_entries_in_the_past_tense() {
-        let conn = db();
-        let trip = seed(&conn, Writer::Dream("a"), "Going to Singapore in July 2026");
-        let tea = seed(&conn, Writer::Bot("a"), "Likes tea");
-        for i in 0..6 {
-            seed(&conn, Writer::Bot("a"), &format!("Filler {i}"));
-        }
-        let snapshot = snapshot(&conn, "a", false, "2026-10-17").unwrap();
-        let plan = Plan {
-            review: vec![
-                Review { id: trip.id, text: "Went to Singapore in July 2026".into() },
-                Review { id: tea.id, text: "Liked tea".into() },
-            ],
-            ..Plan::default()
-        };
-        let (kept, rejected) = audit(&snapshot, &[], plan);
-        assert_eq!(kept.review.len(), 1);
-        assert!(rejected[0].contains("no date"));
-        let Outcome::Changed(dream) = apply(&conn, &snapshot, &kept, &[], 5, 5).unwrap() else { panic!() };
-        assert_eq!(dream.added[0].text, "Went to Singapore in July 2026");
-        assert_eq!(store::get(&conn, trip.id).unwrap().unwrap().superseded_by, Some(dream.added[0].id));
-    }
-
-    #[test]
-    fn parses_the_outermost_object_and_survives_chatter() {
-        let raw = "Sure!\n```json\n{\"add\": [{\"text\": \"Likes tea\", \"quote\": \"I like tea a lot\", \"message\": \"m1\"}]}\n```";
-        let plan = parse(raw).unwrap();
-        assert_eq!(plan.add[0].text, "Likes tea");
-        assert_eq!(plan.archive, [] as [Archive; 0]);
-        assert_eq!(parse("no json here"), None);
-    }
-
-    #[test]
-    fn the_prompt_numbers_messages_and_marks_the_users_entries() {
-        let conn = db();
-        seed(&conn, Writer::User, "Lives in Taipei");
-        let snapshot = snapshot(&conn, "a", true, "2026-10-17").unwrap();
-        let (system, material) = prompt(&snapshot, &[user("u1", "hello there friend"), bot_reply("b1", "hi")]);
-        assert!(system.contains("Today is 2026-10-17"));
-        assert!(material.contains("(this bot, written by the user) Lives in Taipei"));
-        assert!(material.contains("[m1] User, 2026-10-17:\nhello there friend"));
-        assert!(material.contains("[m2] Bot"));
-    }
-}
+mod tests;
