@@ -147,16 +147,10 @@ pub fn check(content: &str) -> std::result::Result<(), Refusal> {
     Ok(())
 }
 
-/// Whether going from `before` to `after` removes more than a quarter of the file.
+/// Whether going from `before` to `after` leaves the file more than a quarter shorter. A changed line is a change,
+/// not a loss; the diff shows a rewrite either way.
 pub fn drops_much(before: &str, after: &str) -> bool {
-    let removed: usize = ops(before, after)
-        .iter()
-        .filter_map(|op| match op {
-            Op::Remove(line) => Some(tokens::estimate(line) + 1),
-            Op::Keep(_) | Op::Add(_) => None,
-        })
-        .sum();
-    removed * 4 > tokens::estimate(before) + before.lines().count()
+    tokens::estimate(after) * 4 < tokens::estimate(before) * 3
 }
 
 /// The lines that changed, `- ` removed and `+ ` added, with two unchanged lines (`  `) around each change and `…`
@@ -571,6 +565,7 @@ mod tests {
         assert_eq!(diff(before, after), "  c\n  d\n- e\n+ E\n  f\n  g");
         assert!(!drops_much(before, after));
         assert!(drops_much(before, "a\nb"));
+        assert!(!drops_much("- Allergic to peanuts", "- Allergic to peanuts and kiwi"), "a changed line is no loss");
         assert_eq!(diff("", "x"), "+ x");
     }
 
