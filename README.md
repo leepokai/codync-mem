@@ -31,6 +31,20 @@ codync_mem::schema::migrate(&conn)?;
 The crate re-exports the `rusqlite` it builds against: use that one, because a build can link only one
 `rusqlite` to `sqlite3`.
 
+## Modules
+
+- `store`: entries in two layers, the user's and a bot's writes, archive, forget (with tombstones), search.
+- `check`: the deterministic checks every write but the user's own passes.
+- `opening`: the memory a session opens with, within the caps, rendered for the instructions.
+- `files`: long-form notes, one Markdown file per topic. You keep the files; the crate keeps every version
+  (content, author, cause), checks a bot's change, diffs it, and renders the index an opening lists.
+- `dream`: between turns, a job for the user's own model (`prompt`), the rules that audit its answer (`audit`,
+  quotes of the user's own words only), and the logged, undoable write (`apply`), plus the lines it adds to notes.
+- `evidence`: what counts as the user's own words (not pasted, quoted or forwarded text).
+- `compaction`: when to summarize a conversation ahead of time, the loop guard, the keep-list and the handoff to
+  a fresh conversation.
+- `tokens`: the token estimate the caps count in (one per CJK character, one per four others).
+
 ## License
 
 Apache-2.0
