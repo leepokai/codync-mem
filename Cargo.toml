@@ -1,6 +1,6 @@
 [package]
 name = "codync-mem"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Memory for coding-agent bots: one store, the rules for who may write it, and what each session sees"
@@ -9,8 +9,8 @@ repository = "https://github.com/leepokai/codync-mem"
 readme = "README.md"
 keywords = ["agent", "memory", "acp", "sqlite"]
 categories = ["database"]
-# Published once Codync runs on it (0.1).
-publish = false
+# The mirror's CI, not part of the package.
+exclude = [".github"]
 
 [dependencies]
 # Callers pass their own connection, so the crate re-exports this rusqlite: one build can't link two.

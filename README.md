@@ -21,6 +21,10 @@ send pull requests to [Codync's `dev` branch](https://github.com/leepokai/Codync
 
 ## Use
 
+```sh
+cargo add codync-mem
+```
+
 ```rust
 use codync_mem::rusqlite::Connection;
 
