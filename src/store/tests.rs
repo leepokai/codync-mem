@@ -95,3 +95,15 @@ fn a_forgotten_memory_isnt_learned_again_from_the_same_message() {
     assert!(matches!(add(&conn, Writer::Bot("a"), from("Likes tea", "m3"), 4, 4), Err(Error::Refused(_))));
     add(&conn, Writer::User, from("Likes tea", "m3"), 5, 5).unwrap();
 }
+
+#[test]
+fn dreaming_leaves_an_entry_the_user_brought_back() {
+    let conn = db();
+    let entry = add(&conn, Writer::Bot("a"), new(Some("a"), "Gets up at 7"), 1, 1).unwrap();
+    archive(&conn, Writer::Bot("a"), entry.id, None, 2, 2).unwrap();
+    bring_back(&conn, entry.id, 3, 3).unwrap();
+    let again = archive(&conn, Writer::Dream("a"), entry.id, None, 4, 4);
+    assert!(matches!(again, Err(Error::UsersOwn)));
+    // The bot may still archive it when the user asks in chat.
+    assert_eq!(archive(&conn, Writer::Bot("a"), entry.id, None, 5, 5).unwrap().state, State::Archived);
+}

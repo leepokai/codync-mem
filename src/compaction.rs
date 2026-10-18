@@ -165,6 +165,20 @@ pub fn rollover_due(c: &Conversation, life: CacheLife, now: i64) -> bool {
 /// harness starts itself.
 pub const KEEP: &str = "When your context is summarized, keep word for word the user's latest request and every \"don't\" or \"不要\" they said; keep exact paths, URLs and ids; keep decisions with their reasons, open tasks with their next step, who said what in group chats, and what a thread is about. Leave out your profile and memory: you get them again.";
 
+/// The most of one message a handoff repeats. A longer one (a pasted log, a document) is cut: carried whole it
+/// would fill the new conversation it starts, and `search_history` still reads it.
+const QUOTE_CHARS: usize = 2_000;
+
+fn quote(text: &str) -> String {
+    let text = text.trim();
+    let total = text.chars().count();
+    if total <= QUOTE_CHARS {
+        return text.to_owned();
+    }
+    let head: String = text.chars().take(QUOTE_CHARS).collect();
+    format!("{head} […cut here; {total} characters in all]")
+}
+
 /// One of the user's recent messages.
 pub struct Request<'a> {
     /// `YYYY-MM-DD`.
@@ -200,12 +214,12 @@ impl Handoff<'_> {
         if !self.requests.is_empty() {
             lines.push(String::new());
             lines.push("The user's latest messages there, word for word:".into());
-            lines.extend(self.requests.iter().map(|r| format!("- ({}) {}", r.date, r.text.trim())));
+            lines.extend(self.requests.iter().map(|r| format!("- ({}) {}", r.date, quote(r.text))));
         }
         if let Some(reply) = self.reply.filter(|s| !s.trim().is_empty()) {
             lines.push(String::new());
             lines.push("Your last reply there:".into());
-            lines.push(reply.trim().to_owned());
+            lines.push(quote(reply));
         }
         if let Some(plan) = self.plan.filter(|s| !s.trim().is_empty()) {
             lines.push(String::new());
@@ -324,5 +338,14 @@ mod tests {
         assert!(text.starts_with("<handoff>") && text.ends_with("</handoff>"));
         assert!(text.contains("Planned a trip.") && text.contains("- (2026-10-18) Book the train to Tainan"));
         assert!(text.contains("from: \"m42\"") && !text.contains("open plan"));
+    }
+
+    #[test]
+    fn a_handoff_cuts_a_long_pasted_message() {
+        let long = "字".repeat(QUOTE_CHARS * 50);
+        let requests = [Request { date: "2026-10-18", text: &long }];
+        let text = Handoff { summary: None, requests: &requests, reply: None, plan: None, bookmark: None }.render();
+        assert!(text.chars().count() < QUOTE_CHARS * 2, "the new conversation starts small");
+        assert!(text.contains(&format!("{} characters in all", QUOTE_CHARS * 50)));
     }
 }

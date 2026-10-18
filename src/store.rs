@@ -105,8 +105,8 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Sqlite(e) => Some(e),
-            Self::Refused(refusal) => Some(refusal),
-            Self::NotFound | Self::UsersOwn => None,
+            // Display already says why: as a source too, the reason would print twice in a chain.
+            Self::Refused(_) | Self::NotFound | Self::UsersOwn => None,
         }
     }
 }
@@ -230,6 +230,13 @@ pub fn activate(conn: &Connection, id: i64, now: i64, rev: i64) -> Result<Entry>
     set_state(conn, id, State::Active, None, now, rev)
 }
 
+/// The user brought an archived entry back: it is active again, and dreaming won't archive it again.
+pub fn bring_back(conn: &Connection, id: i64, now: i64, rev: i64) -> Result<Entry> {
+    let entry = activate(conn, id, now, rev)?;
+    tombstone(conn, entry.bot.as_deref(), std::iter::once(kept(id)))?;
+    Ok(entry)
+}
+
 pub fn pin(conn: &Connection, id: i64, pinned: bool, now: i64, rev: i64) -> Result<Entry> {
     let changed = conn.execute(
         "UPDATE memory_entries SET pinned = ?2, updated_at = ?3, rev = ?4 WHERE id = ?1",
@@ -322,6 +329,9 @@ fn changeable(conn: &Connection, writer: Writer<'_>, id: i64) -> Result<Entry> {
     if matches!(writer, Writer::Bot(_) | Writer::Dream(_)) && entry.author == Author::User {
         return Err(Error::UsersOwn);
     }
+    if matches!(writer, Writer::Dream(_)) && marked(conn, entry.bot.as_deref(), &kept(id))? {
+        return Err(Error::UsersOwn);
+    }
     Ok(entry)
 }
 
@@ -353,14 +363,21 @@ fn duplicate(conn: &Connection, bot: Option<&str>, text: &str) -> Result<bool> {
 }
 
 fn forgotten(conn: &Connection, bot: Option<&str>, text: &str) -> Result<bool> {
+    marked(conn, bot, &fingerprint(text))
+}
+
+pub(crate) fn marked(conn: &Connection, bot: Option<&str>, mark: &str) -> Result<bool> {
     Ok(conn
-        .query_row(
-            "SELECT 1 FROM memory_tombstones WHERE scope = ?1 AND hash = ?2",
-            params![scope(bot), fingerprint(text)],
-            |_| Ok(()),
-        )
+        .query_row("SELECT 1 FROM memory_tombstones WHERE scope = ?1 AND hash = ?2", params![scope(bot), mark], |_| {
+            Ok(())
+        })
         .optional()?
         .is_some())
+}
+
+/// A mark for an entry the user brought back, which dreaming leaves active.
+fn kept(id: i64) -> String {
+    format!("kept:{id}")
 }
 
 /// Tombstones the entry's text and the messages it was learned from, so a reworded copy of it isn't learned again
@@ -370,7 +387,7 @@ fn bury(conn: &Connection, entry: &Entry) -> Result<()> {
     tombstone(conn, entry.bot.as_deref(), marks)
 }
 
-fn tombstone(conn: &Connection, bot: Option<&str>, marks: impl Iterator<Item = String>) -> Result<()> {
+pub(crate) fn tombstone(conn: &Connection, bot: Option<&str>, marks: impl Iterator<Item = String>) -> Result<()> {
     for mark in marks {
         conn.execute(
             "INSERT OR IGNORE INTO memory_tombstones (scope, hash) VALUES (?1, ?2)",

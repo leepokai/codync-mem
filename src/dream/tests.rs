@@ -144,6 +144,14 @@ fn reviews_rewrite_dated_entries_in_the_past_tense() {
     let Outcome::Changed(dream) = apply(&conn, &snapshot, &kept, &[], 5, 5).unwrap() else { panic!() };
     assert_eq!(dream.added[0].text, "Went to Singapore in July 2026");
     assert_eq!(store::get(&conn, trip.id).unwrap().unwrap().superseded_by, Some(dream.added[0].id));
+
+    // The next day's review leaves its own rewrite alone.
+    let went = dream.added[0].id;
+    let snapshot = super::snapshot(&conn, "a", false, "2026-10-18").unwrap();
+    let again = Plan { review: vec![Review { id: went, text: "Went to Singapore".into() }], ..Plan::default() };
+    let (kept, _) = audit(&snapshot, &[], again);
+    assert_eq!(apply(&conn, &snapshot, &kept, &[], 6, 6).unwrap(), Outcome::Unchanged);
+    assert_eq!(store::get(&conn, went).unwrap().unwrap().state, State::Active);
 }
 
 #[test]
