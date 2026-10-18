@@ -142,6 +142,11 @@ pub fn cap(bot: Option<&str>) -> usize {
 
 pub fn add(conn: &Connection, writer: Writer<'_>, new: New<'_>, now: i64, rev: i64) -> Result<Entry> {
     admissible(conn, writer, new.bot, new.text)?;
+    if let Writer::Bot(bot) | Writer::Dream(bot) = writer
+        && spent(conn, bot, new.evidence)?
+    {
+        return Err(Refusal::Forgotten.into());
+    }
     let text = new.text.trim();
     conn.execute(
         "INSERT INTO memory_entries (bot, state, text, author, author_bot, room, evidence, created_at, updated_at, rev)
@@ -244,14 +249,10 @@ pub fn forget(conn: &Connection, id: i64) -> Result<Entry> {
     Ok(entry)
 }
 
-/// Keeps `text` out of a layer (`None`: "yours") for bots and dreaming, as if it had been forgotten: the user
-/// declined it.
-pub fn forbid(conn: &Connection, bot: Option<&str>, text: &str) -> Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO memory_tombstones (scope, hash) VALUES (?1, ?2)",
-        params![scope(bot), fingerprint(text)],
-    )?;
-    Ok(())
+/// Keeps `text`, and memory drawn from the `message` it came from, out of a layer (`None`: "yours") for bots and
+/// dreaming, as if it had been forgotten: the user declined it.
+pub fn forbid(conn: &Connection, bot: Option<&str>, text: &str, message: Option<&str>) -> Result<()> {
+    tombstone(conn, bot, std::iter::once(fingerprint(text)).chain(message.map(cited)))
 }
 
 /// Forgets every entry in one layer (`None`: "yours"). Returns what was deleted.
@@ -362,12 +363,44 @@ fn forgotten(conn: &Connection, bot: Option<&str>, text: &str) -> Result<bool> {
         .is_some())
 }
 
+/// Tombstones the entry's text and the messages it was learned from, so a reworded copy of it isn't learned again
+/// from the same words.
 fn bury(conn: &Connection, entry: &Entry) -> Result<()> {
-    conn.execute(
-        "INSERT OR IGNORE INTO memory_tombstones (scope, hash) VALUES (?1, ?2)",
-        params![scope(entry.bot.as_deref()), fingerprint(&entry.text)],
-    )?;
+    let marks = std::iter::once(fingerprint(&entry.text)).chain(entry.evidence.iter().map(|m| cited(m)));
+    tombstone(conn, entry.bot.as_deref(), marks)
+}
+
+fn tombstone(conn: &Connection, bot: Option<&str>, marks: impl Iterator<Item = String>) -> Result<()> {
+    for mark in marks {
+        conn.execute(
+            "INSERT OR IGNORE INTO memory_tombstones (scope, hash) VALUES (?1, ?2)",
+            params![scope(bot), mark],
+        )?;
+    }
     Ok(())
+}
+
+/// A tombstone for a message rather than a text: no bot or dream may draw memory for the layer from it again.
+fn cited(message: &str) -> String {
+    format!("message:{message}")
+}
+
+/// Whether the user turned down memory from one of these messages in a layer `bot` uses: the message is spent for
+/// both, so a fact undone in one layer doesn't come back in the other.
+fn spent(conn: &Connection, bot: &str, evidence: &[String]) -> Result<bool> {
+    for message in evidence {
+        let found = conn
+            .query_row(
+                "SELECT 1 FROM memory_tombstones WHERE scope IN (?1, ?2) AND hash = ?3",
+                params![scope(None), scope(Some(bot)), cited(message)],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if found.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn scope(bot: Option<&str>) -> String {
@@ -439,86 +472,4 @@ fn parse_author(name: &str) -> Author {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::schema::migrate(&conn).unwrap();
-        conn
-    }
-
-    fn new(bot: Option<&str>, text: &str) -> New<'static> {
-        New { bot: bot.map(|b| &*b.to_owned().leak()), text: text.to_owned().leak(), room: None, evidence: &[] }
-    }
-
-    #[test]
-    fn bots_cannot_change_what_the_user_wrote() {
-        let conn = db();
-        let mine = add(&conn, Writer::User, new(Some("a"), "Likes tea"), 1, 1).unwrap();
-        assert!(matches!(revise(&conn, Writer::Bot("a"), mine.id, "Likes coffee", 2, 2), Err(Error::UsersOwn)));
-        assert!(matches!(archive(&conn, Writer::Dream("a"), mine.id, None, 2, 2), Err(Error::UsersOwn)));
-        let theirs = add(&conn, Writer::Bot("a"), new(Some("a"), "Works late"), 3, 3).unwrap();
-        assert_eq!(theirs.author, Author::Bot);
-        assert_eq!(theirs.author_bot.as_deref(), Some("a"));
-        assert_eq!(revise(&conn, Writer::Bot("a"), theirs.id, "Works late on Fridays", 4, 4).unwrap().rev, 4);
-    }
-
-    #[test]
-    fn forgotten_entries_never_come_back_from_a_bot() {
-        let conn = db();
-        let entry = add(&conn, Writer::Bot("a"), new(None, "Lives in Taipei"), 1, 1).unwrap();
-        forget(&conn, entry.id).unwrap();
-        let again = add(&conn, Writer::Bot("b"), new(None, "lives in  taipei."), 2, 2);
-        assert!(matches!(again, Err(Error::Refused(Refusal::Forgotten))));
-        // The tombstone is per layer, and the user may always write it again.
-        add(&conn, Writer::Bot("a"), new(Some("a"), "Lives in Taipei"), 3, 3).unwrap();
-        add(&conn, Writer::User, new(None, "Lives in Taipei"), 4, 4).unwrap();
-    }
-
-    #[test]
-    fn bot_writes_stop_at_the_cap_but_the_users_do_not() {
-        let conn = db();
-        let fact = "字".repeat(100);
-        for i in 0..3 {
-            add(&conn, Writer::Bot("a"), new(None, &format!("{fact}{i}")), i, i).unwrap();
-        }
-        assert_eq!(used(&conn, None).unwrap(), 303);
-        let over = add(&conn, Writer::Bot("a"), new(None, &format!("{fact}x")), 9, 9);
-        assert!(matches!(over, Err(Error::Refused(Refusal::Full))));
-        add(&conn, Writer::User, new(None, &format!("{fact}y")), 10, 10).unwrap();
-    }
-
-    #[test]
-    fn searches_both_layers_case_insensitively() {
-        let conn = db();
-        add(&conn, Writer::User, new(None, "Allergic to Peanuts"), 1, 1).unwrap();
-        let old = add(&conn, Writer::User, new(Some("a"), "Uses peanut butter in recipes"), 2, 2).unwrap();
-        archive(&conn, Writer::User, old.id, None, 3, 3).unwrap();
-        add(&conn, Writer::User, new(Some("b"), "Peanut farm visit"), 4, 4).unwrap();
-        let found: Vec<String> = search(&conn, "a", "PEANUT", 10).unwrap().into_iter().map(|e| e.text).collect();
-        assert_eq!(found, ["Allergic to Peanuts", "Uses peanut butter in recipes"]);
-        assert_eq!(search(&conn, "a", "100%", 10).unwrap(), [] as [Entry; 0]);
-    }
-
-    #[test]
-    fn a_bot_cant_write_what_the_layer_already_holds() {
-        let conn = db();
-        add(&conn, Writer::User, new(Some("a"), "Likes tea"), 1, 1).unwrap();
-        let again = add(&conn, Writer::Bot("a"), new(Some("a"), "likes  TEA."), 2, 2);
-        assert!(matches!(again, Err(Error::Refused(Refusal::Duplicate))));
-        assert!(admissible(&conn, Writer::Bot("a"), Some("a"), "Likes coffee").is_ok());
-        assert!(admissible(&conn, Writer::Bot("a"), Some("a"), "my password is 1234").is_err());
-    }
-
-    #[test]
-    fn forgetting_a_layer_leaves_the_others() {
-        let conn = db();
-        add(&conn, Writer::User, new(None, "Shared fact"), 1, 1).unwrap();
-        add(&conn, Writer::User, new(Some("a"), "Bot fact"), 2, 2).unwrap();
-        assert_eq!(forget_layer(&conn, Some("a")).unwrap().len(), 1);
-        assert_eq!(layer(&conn, None).unwrap().len(), 1);
-        assert_eq!(layer(&conn, Some("a")).unwrap(), [] as [Entry; 0]);
-        assert_eq!(changed_since(&conn, 0).unwrap().len(), 1);
-    }
-}
+mod tests;

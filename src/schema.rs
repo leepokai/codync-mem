@@ -69,6 +69,31 @@ const MIGRATIONS: &[&str] = &[
         version INTEGER NOT NULL
     );
     CREATE INDEX memory_dream_files_dream ON memory_dream_files (dream);",
+    // 3: entry ids are never reused, so an old undo line, a dream's undo or a bot's stale id can't reach a newer
+    // entry. Ids the dream log still names count as used.
+    "CREATE TABLE memory_entries_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot TEXT,
+        state TEXT NOT NULL,
+        text TEXT NOT NULL,
+        author TEXT NOT NULL,
+        author_bot TEXT,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        superseded_by INTEGER,
+        room TEXT,
+        evidence TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        rev INTEGER NOT NULL
+    );
+    INSERT INTO memory_entries_new SELECT * FROM memory_entries;
+    DROP TABLE memory_entries;
+    ALTER TABLE memory_entries_new RENAME TO memory_entries;
+    CREATE INDEX memory_entries_bot ON memory_entries (bot, state);
+    DELETE FROM sqlite_sequence WHERE name = 'memory_entries';
+    INSERT INTO sqlite_sequence (name, seq) SELECT 'memory_entries', max(
+        coalesce((SELECT max(id) FROM memory_entries), 0),
+        coalesce((SELECT max(entry) FROM memory_dream_changes), 0));",
 ];
 
 /// Brings the crate's tables up to date. Safe to call on every start.
@@ -103,5 +128,39 @@ mod tests {
         let version: i64 =
             conn.query_row("SELECT value FROM memory_meta WHERE key = 'schema'", [], |row| row.get(0)).unwrap();
         assert_eq!(version, i64::try_from(MIGRATIONS.len()).unwrap());
+    }
+
+    fn insert(conn: &Connection) -> i64 {
+        conn.execute(
+            "INSERT INTO memory_entries (state, text, author, created_at, updated_at, rev)
+             VALUES ('active', 'x', 'user', 0, 0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn entry_ids_are_not_reused() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrate(&conn).unwrap();
+        let first = insert(&conn);
+        conn.execute("DELETE FROM memory_entries WHERE id = ?1", [first]).unwrap();
+        assert!(insert(&conn) > first);
+    }
+
+    #[test]
+    fn upgrading_keeps_entries_and_skips_ids_the_dream_log_names() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE memory_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)").unwrap();
+        conn.execute_batch(&MIGRATIONS[..2].concat()).unwrap();
+        conn.execute("INSERT INTO memory_meta (key, value) VALUES ('schema', 2)", []).unwrap();
+        let kept = insert(&conn);
+        conn.execute("INSERT INTO memory_dream_changes (dream, entry, change) VALUES (1, 7, 'added')", []).unwrap();
+        migrate(&conn).unwrap();
+        let text: String =
+            conn.query_row("SELECT text FROM memory_entries WHERE id = ?1", [kept], |row| row.get(0)).unwrap();
+        assert_eq!(text, "x");
+        assert_eq!(insert(&conn), 8);
     }
 }
