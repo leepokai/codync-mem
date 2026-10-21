@@ -228,7 +228,7 @@ fn reviews_rewrite_dated_lines_in_the_past_tense_once() {
     let snapshot = super::snapshot(&conn, "a", false, "2026-10-18").unwrap();
     let again = Plan { review: vec![review("Went to Singapore in July 2026", "Went to Singapore")], ..Plan::default() };
     let (kept, _) = audit(&snapshot, &[], again);
-    assert!(edits(&conn, &snapshot, &kept, &[]).unwrap().0.files.is_empty());
+    assert_eq!(edits(&conn, &snapshot, &kept, &[]).unwrap().0.files, [] as [Edit; 0]);
 }
 
 #[test]

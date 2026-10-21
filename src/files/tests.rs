@@ -135,7 +135,7 @@ fn records_versions_and_indexes_live_notes() {
 
     assert_eq!(forget_layer(&conn, Some("a")).unwrap(), [MAIN, "people.md"]);
     assert_eq!(layer(&conn, Some("a")).unwrap(), [] as [File; 0]);
-    assert!(facts_of(&conn, Some("a")).unwrap().is_empty());
+    assert_eq!(facts_of(&conn, Some("a")).unwrap(), [] as [Fact; 0]);
     assert_eq!(layer(&conn, None).unwrap().len(), 1);
 }
 
