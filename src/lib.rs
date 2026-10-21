@@ -9,6 +9,7 @@ pub mod compaction;
 pub mod dream;
 pub mod evidence;
 pub mod files;
+pub mod legacy;
 pub mod opening;
 pub mod schema;
 pub mod store;

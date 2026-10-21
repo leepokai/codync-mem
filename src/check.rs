@@ -15,12 +15,12 @@ pub enum Refusal {
     Instruction,
     /// Passwords, keys, ID or card numbers: never stored, even when asked.
     Secret,
-    /// The user deleted this memory before.
+    /// The user had a bot forget this.
     Forgotten,
-    /// The layer already holds this memory.
-    Duplicate,
-    /// The layer is at its cap.
+    /// `MEMORY.md` is past its layer's cap.
     Full,
+    /// Outside a turn the user started in the bot's own chat, memory only gains lines.
+    NotAsked,
     /// A long-form memory file without the `description:` line its index entry comes from.
     NoDescription,
     /// A long-form memory file past its cap.
@@ -31,14 +31,18 @@ impl Refusal {
     pub fn message(self) -> &'static str {
         match self {
             Self::Empty => "The memory is empty.",
-            Self::TooLong => "Too long for one memory. Keep it to one short fact.",
+            Self::TooLong => "Too long for one line of MEMORY.md. Keep each line to one short fact.",
             Self::HiddenCharacters => "The text contains hidden characters.",
             Self::PromptLink => "The text contains a link that carries a prompt.",
             Self::Instruction => "Memory holds facts about the user, not instructions to an assistant.",
             Self::Secret => "Passwords, keys, ID numbers and card or account numbers are never stored.",
-            Self::Forgotten => "The user deleted this memory before, so it isn't saved again.",
-            Self::Duplicate => "Memory already has this.",
-            Self::Full => "This memory layer is full. Revise or archive an entry first.",
+            Self::Forgotten => {
+                "The user had this forgotten. It comes back only when they ask for it again in their own chat."
+            }
+            Self::Full => "MEMORY.md is full. Move detail into a note, or take out what's no longer true.",
+            Self::NotAsked => {
+                "Only in a turn the user started in your own chat can memory lose or change a line; at other times you can only add."
+            }
             Self::NoDescription => {
                 "A memory file starts with frontmatter whose description: line says when to read it."
             }
@@ -63,7 +67,7 @@ pub fn text(text: &str) -> Result<(), Refusal> {
     if text.is_empty() {
         return Err(Refusal::Empty);
     }
-    if tokens::estimate(text) > tokens::ENTRY_CAP {
+    if tokens::estimate(text) > tokens::LINE_CAP {
         return Err(Refusal::TooLong);
     }
     content(text)
@@ -129,8 +133,11 @@ fn secret(text: &str, lower: &str) -> bool {
         || lower.split_whitespace().any(|word| KEY_PREFIXES.iter().any(|prefix| key_like(word, prefix)))
         || national_id(text)
         || digit_runs(text).iter().any(|run| (13..=19).contains(&run.len()) && luhn(run))
-        || (ACCOUNT_LABELS.iter().any(|label| lower.contains(label))
-            && digit_runs(text).iter().any(|run| run.len() >= 6))
+        // A label and a number make an account number only on one line: a file's lines are separate facts.
+        || text.lines().any(|line| {
+            let lower = line.to_lowercase();
+            ACCOUNT_LABELS.iter().any(|label| lower.contains(label)) && digit_runs(line).iter().any(|run| run.len() >= 6)
+        })
 }
 
 fn key_like(word: &str, prefix: &str) -> bool {
@@ -219,5 +226,11 @@ mod tests {
         assert_eq!(text("SSN 123-45-6789"), Err(Refusal::Secret));
         assert_eq!(text("Card 4111 1111 1111 1111"), Err(Refusal::Secret));
         assert_eq!(text("銀行帳號 012345678901"), Err(Refusal::Secret));
+    }
+
+    #[test]
+    fn lines_are_checked_apart() {
+        assert_eq!(content("- GitHub 帳號是 leepokai\n- 手機 0912-345-678\n"), Ok(()));
+        assert_eq!(content("- Likes tea\n- 銀行帳號 012345678901\n"), Err(Refusal::Secret));
     }
 }

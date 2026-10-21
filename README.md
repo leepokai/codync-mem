@@ -5,11 +5,13 @@ Specially designed for bot-based memory: the memory system the coding-agent bots
 
 - **It records the person, not the work.** Project knowledge stays in the harness's own files (`AGENTS.md`,
   `CLAUDE.md`); the full conversation stays in your transcript.
-- **Two layers.** "Yours" is shared by every bot; each bot also has its own. Both have token caps, and the active
-  entries go into a session's opening in full.
-- **One store with rules for who writes it.** The user writes directly. A bot writes through its tool, which
-  follows the bot's permission mode. Every write except the user's own passes deterministic checks: no hidden
-  characters, prompt-carrying links, planted instructions or secrets, and nothing the user deleted comes back.
+- **Memory is Markdown files the bot keeps.** Each layer ("yours", shared by every bot, and each bot's own) is a
+  folder: `MEMORY.md`, one short fact per line, which a session opens with in full within a token cap, and notes
+  on one topic each, read when it comes up. The bot edits them like any file.
+- **Rules for what a bot may change.** What every change a bot or dreaming makes brings in passes deterministic
+  checks: no hidden characters, prompt-carrying links, planted instructions or secrets, and the caps. Outside a turn the user started
+  in the bot's own chat, a bot only adds lines; what the user had it forget doesn't come back unless they ask
+  again. The crate keeps every version and who wrote each fact.
 
 The crate decides; the caller acts. It starts no processes, opens no network connections, calls no models and
 spawns no threads. It keeps its own tables on the caller's SQLite connection and writes inside the caller's
@@ -38,13 +40,17 @@ The crate re-exports the `rusqlite` it builds against: use that one, because a b
 
 ## Modules
 
-- `store`: entries in two layers, the user's and a bot's writes, archive, forget (with tombstones), search.
-- `check`: the deterministic checks every write but the user's own passes.
-- `opening`: the memory a session opens with, within the caps, rendered for the instructions.
-- `files`: long-form notes, one Markdown file per topic. You keep the files; the crate keeps every version
-  (content, author, cause), checks a bot's change, diffs it, and renders the index an opening lists.
+- `files`: the files of a layer. You keep them on disk; the crate keeps every version (content, author, cause),
+  who wrote each fact of `MEMORY.md` and what it was learned from, checks what a change brings in
+  (`check_change`), decides what a bot may change (`admit`) and what the user had it forget (`settle`), searches
+  them, and renders the notes' index (`index`).
+- `store`: tombstones of what the user had a bot forget, and the error type.
+- `check`: the deterministic checks every change but the user's own passes.
+- `opening`: the memory a session opens with (each `MEMORY.md` the bot sees), rendered for the instructions.
 - `dream`: between turns, a job for the user's own model (`prompt`), the rules that audit its answer (`audit`,
-  quotes of the user's own words only), and the logged, undoable write (`apply`), plus the lines it adds to notes.
+  quotes of the user's own words only), the files' new content (`edits`, read-only: you write the files and mark
+  each review's rewrite with `mark_reviewed`), and the run's log.
+- `legacy`: the memory entries of codync-mem 0.1, read once to move them into files.
 - `evidence`: what counts as the user's own words (not pasted, quoted or forwarded text).
 - `compaction`: when to summarize a conversation ahead of time, the loop guard, the keep-list and the handoff to
   a fresh conversation.

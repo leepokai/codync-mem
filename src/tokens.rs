@@ -3,12 +3,12 @@
 //! Caps count tokens, not characters, so Chinese isn't penalised: 2,000 CJK characters are 2–3k tokens, 2,000
 //! English characters about 500. The estimate counts one token per CJK character and one per four others.
 
-/// The most the shared "yours" layer may hold, in estimated tokens.
+/// The most the shared "yours" layer's `MEMORY.md` may hold, in estimated tokens.
 pub const YOURS_CAP: usize = 400;
-/// The most one bot's own layer may hold, in estimated tokens.
+/// The most one bot's own `MEMORY.md` may hold, in estimated tokens.
 pub const BOT_CAP: usize = 1_200;
-/// The most a single entry may hold, in estimated tokens. Memories are short facts, not documents.
-pub const ENTRY_CAP: usize = 150;
+/// The most one line of `MEMORY.md` may hold, in estimated tokens. Memories are short facts, not documents.
+pub const LINE_CAP: usize = 150;
 
 /// Estimated tokens in `text`.
 pub fn estimate(text: &str) -> usize {

@@ -94,6 +94,24 @@ const MIGRATIONS: &[&str] = &[
     INSERT INTO sqlite_sequence (name, seq) SELECT 'memory_entries', max(
         coalesce((SELECT max(id) FROM memory_entries), 0),
         coalesce((SELECT max(entry) FROM memory_dream_changes), 0));",
+    // 4: memory is files. Who wrote each fact of a layer's MEMORY.md and what it was learned from, and the lines a
+    // dream added and removed. The entries move into the files once (`legacy`), which drops their tables.
+    "CREATE TABLE memory_facts (
+        bot TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        author TEXT NOT NULL,
+        author_bot TEXT,
+        message TEXT,
+        at INTEGER NOT NULL,
+        PRIMARY KEY (bot, fingerprint)
+    ) WITHOUT ROWID;
+    CREATE TABLE memory_dream_lines (
+        id INTEGER PRIMARY KEY,
+        dream INTEGER NOT NULL,
+        change TEXT NOT NULL,
+        text TEXT NOT NULL
+    );
+    CREATE INDEX memory_dream_lines_dream ON memory_dream_lines (dream);",
 ];
 
 /// Brings the crate's tables up to date. Safe to call on every start.
@@ -128,39 +146,5 @@ mod tests {
         let version: i64 =
             conn.query_row("SELECT value FROM memory_meta WHERE key = 'schema'", [], |row| row.get(0)).unwrap();
         assert_eq!(version, i64::try_from(MIGRATIONS.len()).unwrap());
-    }
-
-    fn insert(conn: &Connection) -> i64 {
-        conn.execute(
-            "INSERT INTO memory_entries (state, text, author, created_at, updated_at, rev)
-             VALUES ('active', 'x', 'user', 0, 0, 0)",
-            [],
-        )
-        .unwrap();
-        conn.last_insert_rowid()
-    }
-
-    #[test]
-    fn entry_ids_are_not_reused() {
-        let conn = Connection::open_in_memory().unwrap();
-        migrate(&conn).unwrap();
-        let first = insert(&conn);
-        conn.execute("DELETE FROM memory_entries WHERE id = ?1", [first]).unwrap();
-        assert!(insert(&conn) > first);
-    }
-
-    #[test]
-    fn upgrading_keeps_entries_and_skips_ids_the_dream_log_names() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE memory_meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)").unwrap();
-        conn.execute_batch(&MIGRATIONS[..2].concat()).unwrap();
-        conn.execute("INSERT INTO memory_meta (key, value) VALUES ('schema', 2)", []).unwrap();
-        let kept = insert(&conn);
-        conn.execute("INSERT INTO memory_dream_changes (dream, entry, change) VALUES (1, 7, 'added')", []).unwrap();
-        migrate(&conn).unwrap();
-        let text: String =
-            conn.query_row("SELECT text FROM memory_entries WHERE id = ?1", [kept], |row| row.get(0)).unwrap();
-        assert_eq!(text, "x");
-        assert_eq!(insert(&conn), 8);
     }
 }
