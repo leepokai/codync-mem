@@ -60,19 +60,21 @@ fn points_to(line: &str) -> Option<&str> {
 /// Leaves a layer's `MEMORY.md` (`lines`) one line pointing to each note its moved lines went into ([`pointer`]):
 /// the run's summary of the topic, else what the note is about. A line already pointing to the note stays, unless
 /// the run summed the topic up anew and the user didn't write that line: it is then rewritten in place. A pointer
-/// that would fail `MEMORY.md`'s checks (no room, a line too long) gives way to the next, or is left out, as the
-/// index lists the note anyway, so it never costs the run its other changes. Returns the lines taken out and the
-/// texts added.
+/// that would fail `MEMORY.md`'s checks (no room, a line too long) or that the user had forgotten gives way to the
+/// next, or is left out, as the index lists the note anyway, so it never costs the run its other changes. Returns
+/// the lines taken out and the texts added.
 pub(super) fn point(
+    conn: &Connection,
     snapshot: &Snapshot,
     layer: &Layer,
     moved: &[&MoveOut],
     lines: &mut Vec<String>,
-) -> (Vec<String>, Vec<String>) {
+) -> store::Result<(Vec<String>, Vec<String>)> {
     let bot = snapshot.layer_bot(layer.shared);
     let passes = |lines: &[String]| {
         files::check_change(bot, files::MAIN, layer.content.as_deref(), &super::edits::joined(lines), false).is_ok()
     };
+    let forgotten = |text: &str| store::forgotten(conn, bot, text);
     let (mut removed, mut added) = (Vec::new(), Vec::new());
     for (i, first) in moved.iter().enumerate() {
         let note = first.file.as_str();
@@ -83,6 +85,9 @@ pub(super) fn point(
         let Some(at) = lines.iter().position(|l| points_to(l) == Some(note)) else {
             for summed in summary.map(str::to_owned).into_iter().chain(about(snapshot, first)) {
                 let text = pointer(&summed, note);
+                if forgotten(&text)? {
+                    continue;
+                }
                 lines.push(format!("- {text}"));
                 if passes(lines) {
                     added.push(text);
@@ -94,7 +99,7 @@ pub(super) fn point(
         };
         let Some(text) = summary.map(|s| pointer(s, note)) else { continue };
         let old = unmarked(&lines[at]);
-        if old == text || snapshot.fact(layer.shared, old).is_some_and(|f| f.author.is_users()) {
+        if old == text || snapshot.fact(layer.shared, old).is_some_and(|f| f.author.is_users()) || forgotten(&text)? {
             continue;
         }
         let was = std::mem::replace(&mut lines[at], format!("- {text}"));
@@ -105,7 +110,7 @@ pub(super) fn point(
             lines[at] = was;
         }
     }
-    (removed, added)
+    Ok((removed, added))
 }
 
 /// What a note is about, best first: the move's description (a new note's), the note's own, its name.

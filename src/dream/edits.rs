@@ -38,8 +38,8 @@ pub struct Edits {
 }
 
 /// Turns an audited plan into each file's new content. An add the user had forgotten, learned from a message whose
-/// memory was forgotten, already in memory, or past the cap is dropped here, with why. A line moves into a note
-/// only when its note takes it and `MEMORY.md` loses it.
+/// memory was forgotten, already in memory, or past the cap is dropped here, with why, and so is a review whose
+/// rewrite the user had forgotten. A line moves into a note only when its note takes it and `MEMORY.md` loses it.
 pub fn edits(
     conn: &Connection,
     snapshot: &Snapshot,
@@ -100,7 +100,7 @@ fn main_edit(
     for moved in moved {
         removed.extend(take_out(&mut lines, &moved.line));
     }
-    let (replaced, pointers) = notes::point(snapshot, layer, moved, &mut lines);
+    let (replaced, pointers) = notes::point(conn, snapshot, layer, moved, &mut lines)?;
     removed.extend(replaced);
     let mut added: Vec<Line> = pointers.iter().map(|text| line(text, None, None)).collect();
     for review in plan.review.iter().filter(|r| r.shared == layer.shared) {
@@ -109,8 +109,12 @@ fn main_edit(
         if store::marked(conn, bot, &reviewed_mark(&review.line))? {
             continue;
         }
+        let text = review.text.trim();
+        if store::forgotten(conn, bot, text)? {
+            rejected.push(format!("review \"{}\": the user had \"{text}\" forgotten", review.line));
+            continue;
+        }
         if let Some(old) = take_out(&mut lines, &review.line) {
-            let text = review.text.trim();
             removed.push(old);
             lines.push(format!("- {text}"));
             added.push(line(text, fact.message.clone(), Some(fact.clone())));
