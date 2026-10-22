@@ -85,7 +85,7 @@ fn a_full_memory_moves_detail_out_and_the_log_keeps_the_run() {
 
     // A note that can't take the line leaves it in MEMORY.md.
     let crowded = format!("---\ndescription: The user's week\n---\n{}", "字".repeat(FILE_CAP - 10));
-    write(&conn, Author::Bot, "week.md", &crowded);
+    write(&conn, Some("a"), Author::Bot, "week.md", &crowded);
     let crowded_snapshot = super::snapshot(&conn, "a", false, "2026-10-17").unwrap();
     let (kept, _) = audit(&crowded_snapshot, &[], kept);
     let (stuck, rejected) = super::edits(&conn, &crowded_snapshot, &kept, &[]).unwrap();
@@ -131,7 +131,7 @@ fn a_full_memory_tidies_into_topic_folders_even_the_users_lines() {
     seed(&conn, Author::User, &lines([filler(0)]));
     seed(&conn, Author::Bot, &lines((0..9).map(filler)));
     let snapshot = snapshot(&conn, "a", false, "2026-10-17").unwrap();
-    assert!(snapshot.full && full(snapshot.layers[0].content.as_deref().unwrap(), Some("a")));
+    assert!(snapshot.full && snapshot.layer_full(false));
     assert!(prompt(&snapshot, &[]).0.contains("their lines move too"), "a move isn't a removal to the model");
     // The new note is described once, on the first line sent there.
     let into = |i, summary: &str| {
@@ -212,7 +212,13 @@ fn a_topic_keeps_one_line_pointing_to_its_note() {
 fn without_a_summary_a_pointer_says_what_its_note_is_about() {
     let conn = db();
     seed(&conn, Author::Bot, &lines((0..9).map(filler)));
-    write(&conn, Author::Bot, "health/allergies.md", "---\ndescription: The user's allergies\n---\n- Peanuts\n");
+    write(
+        &conn,
+        Some("a"),
+        Author::Bot,
+        "health/allergies.md",
+        "---\ndescription: The user's allergies\n---\n- Peanuts\n",
+    );
     let snapshot = snapshot(&conn, "a", false, "2026-10-17").unwrap();
     let pointer_to = |file: &str, description: &str| {
         let plan = Plan { move_out: vec![move_out(&filler(0), file, description, "")], ..Plan::default() };
@@ -283,4 +289,23 @@ fn a_line_memory_md_keeps_doesnt_go_into_a_note_too() {
     let (edits, rejected) = edits(&conn, &snapshot, &kept, &[]).unwrap();
     assert!(edits.files.is_empty(), "{edits:?}");
     assert!(rejected.iter().any(|r| r.contains(line) && r.contains("wasn't changed")), "{rejected:?}");
+}
+
+#[test]
+fn only_the_layer_that_is_nearly_full_gets_tidied() {
+    let conn = db();
+    seed(&conn, Author::Bot, &lines((0..9).map(filler)));
+    write(&conn, None, Author::User, MAIN, "- Lives in Taipei\n");
+    let snapshot = snapshot(&conn, "a", true, "2026-10-17").unwrap();
+    assert!(snapshot.full, "this bot's own MEMORY.md is nearly full");
+    let (system, material) = prompt(&snapshot, &[]);
+    assert!(system.contains("Tidy each MEMORY.md shown as nearly full"), "{system}");
+    assert!(material.contains("This bot's (\"shared\": false, nearly full)"), "{material}");
+    assert!(material.contains("Shared (\"shared\": true)"), "only the full layer is marked: {material}");
+    let from_shared = MoveOut { shared: true, ..move_out("Lives in Taipei", "home.md", "Where the user lives", "") };
+    let own = move_out(&filler(0), "week.md", "The user's week", "");
+    let (kept, rejected) = audit(&snapshot, &[], Plan { move_out: vec![from_shared, own], ..Plan::default() });
+    assert_eq!(kept.move_out.len(), 1, "{rejected:?}");
+    assert!(!kept.move_out[0].shared, "the bot's own full layer is tidied");
+    assert!(rejected[0].contains("Lives in Taipei") && rejected[0].contains("isn't full"), "{rejected:?}");
 }

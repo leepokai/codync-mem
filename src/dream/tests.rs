@@ -27,13 +27,13 @@ fn remove(line: &str, quote: &str, message: &str) -> Remove {
 
 /// Writes bot `a`'s MEMORY.md as `author` wrote it.
 fn seed(conn: &Connection, author: Author, content: &str) {
-    write(conn, author, MAIN, content);
+    write(conn, Some("a"), author, MAIN, content);
 }
 
-/// Writes bot `a`'s file `name` as `author` wrote it.
-fn write(conn: &Connection, author: Author, name: &str, content: &str) {
+/// Writes the file `name` of `bot`'s layer (`None`: the shared one) as `author` wrote it.
+fn write(conn: &Connection, bot: Option<&str>, author: Author, name: &str, content: &str) {
     let change = Change {
-        bot: Some("a"),
+        bot,
         name,
         content: Some(content),
         author,

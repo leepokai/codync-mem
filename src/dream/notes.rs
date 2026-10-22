@@ -160,7 +160,8 @@ pub(super) fn audit(
         moved.shared &= snapshot.shared;
         describe(moved.shared, &moved.file, &mut moved.description);
         let verdict = (|| {
-            if !snapshot.full {
+            // Only the layer that is nearly full gets tidied: the other keeps its lines, the user's above all.
+            if !snapshot.layer_full(moved.shared) {
                 return Err("MEMORY.md isn't full");
             }
             // Even a line the user wrote moves: word for word, into a note of the same layer.

@@ -83,25 +83,31 @@ impl Snapshot {
     pub fn layer_bot(&self, shared: bool) -> Option<&str> {
         (!shared).then_some(self.bot.as_str())
     }
+
+    /// Whether a layer's `MEMORY.md` is nearly full ([`full`]): only then do its lines move out to notes.
+    fn layer_full(&self, shared: bool) -> bool {
+        let content = self.layer(shared).and_then(|l| l.content.as_deref()).unwrap_or_default();
+        full(content, self.layer_bot(shared))
+    }
 }
 
 pub fn snapshot(conn: &Connection, bot: &str, shared: bool, today: &str) -> store::Result<Snapshot> {
     let mut layers = Vec::new();
-    let mut tidy = false;
     for (layer, is_shared) in std::iter::once((Some(bot), false)).chain(shared.then_some((None, true))) {
         let content = files::current(conn, layer, MAIN)?;
-        tidy |= full(content.as_deref().unwrap_or_default(), layer);
         layers.push(Layer { shared: is_shared, content, facts: files::facts_of(conn, layer)? });
     }
     let index = files::index(conn, bot, shared)?;
-    Ok(Snapshot {
+    let mut snapshot = Snapshot {
         bot: bot.to_owned(),
         shared,
         layers,
         files: index.yours.unwrap_or_default().into_iter().chain(index.bot).collect(),
-        full: tidy,
+        full: false,
         today: today.to_owned(),
-    })
+    };
+    snapshot.full = snapshot.layers.iter().any(|l| snapshot.layer_full(l.shared));
+    Ok(snapshot)
 }
 
 /// Whether a layer's `MEMORY.md` (`layer`: `None` for the shared one) is nine-tenths full: a run then tidies it,
@@ -110,12 +116,13 @@ pub fn full(content: &str, layer: Option<&str>) -> bool {
     crate::tokens::estimate(content) * 10 >= files::cap(layer) * 9
 }
 
-/// What the prompt adds when MEMORY.md is nearly full: after the rule on the user's lines (without it the model reads
-/// a move as a removal and leaves a full MEMORY.md of the user's lines as it is), the tidying rule, the output shape.
+/// What the prompt adds when a MEMORY.md is nearly full (the material marks which): after the rule on the user's lines
+/// (without it the model reads a move as a removal and leaves a full MEMORY.md of the user's lines as it is), the
+/// tidying rule, the output shape.
 const TIDY: [&str; 3] = [
     " Moving one word for word into a note (\"moveOut\") keeps it, so their lines move too.",
-    "\n- MEMORY.md is nearly full, so tidy it the way a project's CLAUDE.md keeps one line per topic and points \
-into its docs: \"moveOut\" moves a topic's detail lines word for word into the note for that topic, and \"summary\" \
+    "\n- Tidy each MEMORY.md shown as nearly full, and no other, the way a project's CLAUDE.md keeps one line per \
+topic and points into its docs: \"moveOut\" moves a topic's detail lines word for word into the note for that topic, and \"summary\" \
 is the one short line MEMORY.md keeps for the topic instead, saying what every reply still needs, in the user's \
 language. The host adds \" → \" and the note's path. A line already ending in \"→ path\" points to a note: don't \
 move it; give a new summary for its note when the moved lines change what it should say.",
@@ -174,7 +181,12 @@ Output only one JSON object:
         .layers
         .iter()
         .flat_map(|layer| {
-            let where_ = if layer.shared { "Shared (\"shared\": true)" } else { "This bot's (\"shared\": false)" };
+            let nearly = if snapshot.layer_full(layer.shared) { ", nearly full" } else { "" };
+            let where_ = if layer.shared {
+                format!("Shared (\"shared\": true{nearly})")
+            } else {
+                format!("This bot's (\"shared\": false{nearly})")
+            };
             [(true, "written by the user"), (false, "the rest")].into_iter().filter_map(move |(users, who)| {
                 let lines: Vec<String> = layer
                     .facts
