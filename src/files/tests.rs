@@ -25,7 +25,7 @@ fn change<'a>(bot: Option<&'a str>, name: &'a str, content: Option<&'a str>) -> 
 
 #[test]
 fn names_are_memory_md_or_lowercase_slugs() {
-    for ok in ["MEMORY.md", "people.md", "trip-2026.md", "a.md"] {
+    for ok in ["MEMORY.md", "people.md", "trip-2026.md", "a.md", "health/allergies.md", "a/b/c/d.md"] {
         assert!(valid_name(ok), "{ok}");
     }
     for bad in [
@@ -34,13 +34,20 @@ fn names_are_memory_md_or_lowercase_slugs() {
         "人.md",
         ".md",
         "notes.txt",
-        "a/b.md",
         ".hidden.md",
         "x y.md",
-        &format!("{}.md", "a".repeat(62)),
+        &format!("{}.md", "a".repeat(126)),
+        "health/MEMORY.md",
+        "/health.md",
+        "health//a.md",
+        "../a.md",
+        "a/b/c/d/e.md",
+        "a\\b.md",
     ] {
         assert!(!valid_name(bad), "{bad}");
     }
+    assert!(valid_folder("health") && valid_folder("a/b/c"));
+    assert!(!valid_folder(".git") && !valid_folder("a/b/c/d") && !valid_folder("Health"));
 }
 
 #[test]
@@ -58,7 +65,7 @@ fn reads_the_description_and_the_facts() {
 #[test]
 fn checks_what_a_bot_writes() {
     fn check(bot: Option<&str>, name: &str, content: &str) -> std::result::Result<(), Refusal> {
-        check_change(bot, name, None, content)
+        check_change(bot, name, None, content, false)
     }
     assert_eq!(check(Some("a"), "people.md", PEOPLE), Ok(()));
     assert_eq!(check(Some("a"), "people.md", "# People\n"), Err(Refusal::NoDescription));
@@ -76,25 +83,29 @@ fn checks_what_a_bot_writes() {
     let full = (0..5).map(|i| format!("- {}{i}\n", "字".repeat(99))).collect::<Vec<_>>().concat();
     assert_eq!(check(Some("a"), MAIN, &full), Ok(()), "500 tokens fit a bot's own");
     assert_eq!(check(None, MAIN, &full), Err(Refusal::Full), "but not the shared 400");
+    assert_eq!(check_change(None, MAIN, None, &full, true), Ok(()), "unless the user asked, up to twice the cap");
+    let double = format!("{full}{full}");
+    assert_eq!(check_change(None, MAIN, Some(&full), &double, true), Err(Refusal::Full));
 }
 
 #[test]
 fn only_what_a_change_brings_in_is_checked() {
+    let check = |bot, name, before, after: &str| check_change(bot, name, before, after, false);
     // A line the user wrote that the checks withhold, and a file over its cap, don't block changes around them.
     let withheld = "- 銀行帳號 012345678901\n- Likes tea\n";
-    assert_eq!(check_change(Some("a"), MAIN, Some(withheld), &format!("{withheld}- Has two cats\n")), Ok(()));
-    assert_eq!(check_change(Some("a"), MAIN, Some(withheld), "- 銀行帳號 012345678901\n"), Ok(()));
+    assert_eq!(check(Some("a"), MAIN, Some(withheld), &format!("{withheld}- Has two cats\n")), Ok(()));
+    assert_eq!(check(Some("a"), MAIN, Some(withheld), "- 銀行帳號 012345678901\n"), Ok(()));
     let over = (0..5).map(|i| format!("- {}{i}\n", "字".repeat(99))).collect::<Vec<_>>().concat();
     let fewer = over.split_inclusive('\n').skip(1).collect::<String>();
-    assert_eq!(check_change(None, MAIN, Some(&over), &fewer), Ok(()), "it may shrink while still over");
-    assert_eq!(check_change(None, MAIN, Some(&over), &format!("{over}- Has two cats\n")), Err(Refusal::Full));
+    assert_eq!(check(None, MAIN, Some(&over), &fewer), Ok(()), "it may shrink while still over");
+    assert_eq!(check(None, MAIN, Some(&over), &format!("{over}- Has two cats\n")), Err(Refusal::Full));
     assert_eq!(
-        check_change(Some("a"), MAIN, Some(withheld), &format!("{withheld}- Wi-Fi password: hunter22\n")),
+        check(Some("a"), MAIN, Some(withheld), &format!("{withheld}- Wi-Fi password: hunter22\n")),
         Err(Refusal::Secret),
         "what it brings in still is"
     );
     let long_note = format!("{PEOPLE}{}\n", "字".repeat(FILE_CAP));
-    assert_eq!(check_change(Some("a"), "people.md", Some(&long_note), PEOPLE), Ok(()));
+    assert_eq!(check(Some("a"), "people.md", Some(&long_note), PEOPLE), Ok(()));
 }
 
 #[test]

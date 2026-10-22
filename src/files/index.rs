@@ -2,7 +2,7 @@
 
 use rusqlite::Connection;
 
-use super::{FILE_CAP, FOLDER_CAP, File, MAIN, layer};
+use super::{DEPTH_MAX, FILE_CAP, FOLDER_CAP, File, MAIN, layer};
 use crate::check;
 use crate::store::Result;
 
@@ -27,12 +27,12 @@ impl Index {
     /// The section of the opening, with each layer's folder as `folder` names it. Files and folders over their caps
     /// are marked, never cut.
     pub fn render(&self, folder: impl Fn(Option<&str>) -> String) -> String {
-        let mut lines = vec![
-            "Notes: one topic each, for detail too long for MEMORY.md (lists, itineraries, histories). Read a note \
-             when its topic comes up. Each starts with frontmatter whose description: line says when to read it; file \
-             names are lowercase-with-dashes.md."
-                .to_owned(),
-        ];
+        let mut lines = vec![format!(
+            "Notes: one topic each, for detail too long for MEMORY.md (lists, itineraries, histories), in topic \
+             folders up to {DEPTH_MAX} deep, like a project's docs (people/family.md, health/allergies.md). Read a \
+             note when its topic comes up. Each starts with frontmatter whose description: line says when to read \
+             it; names are lowercase-with-dashes."
+        )];
         if let Some(yours) = &self.yours {
             lines.push(format!("Shared with the user's other bots, in {}:", folder(None)));
             lines.extend(Self::folder_lines(yours));

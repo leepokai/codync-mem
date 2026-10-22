@@ -1,11 +1,12 @@
 //! What dreaming adds to notes: a line that cites the user's words (`append`), or a line moved out of a nearly full
-//! `MEMORY.md` (`moveOut`). It only appends; it never rewrites a note.
+//! `MEMORY.md` (`moveOut`), which keeps one line summing the topic up and pointing to the note ([`pointer`]). It
+//! only appends; it never rewrites a note.
 
 use rusqlite::Connection;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
-use super::{Edit, Message, Plan, Snapshot, cite};
+use super::{Edit, Layer, Message, Plan, Snapshot, cite};
 use crate::files;
 use crate::store::{self, unmarked};
 use crate::{check, tokens};
@@ -38,6 +39,81 @@ pub struct MoveOut {
     pub file: String,
     #[serde(default)]
     pub description: String,
+    /// What every reply still needs from the topic: `MEMORY.md` keeps it as the line pointing to the note
+    /// ([`pointer`]). Without one, a note it doesn't point to yet is summed up by its description, else its name.
+    #[serde(default)]
+    pub summary: String,
+}
+
+/// The line `MEMORY.md` keeps for a note, the way a project's `CLAUDE.md` points into its `docs/`: what every reply
+/// needs from the topic, then where the rest is (`Allergic to peanuts → health/allergies.md`).
+fn pointer(summary: &str, note: &str) -> String {
+    format!("{} → {note}", summary.trim())
+}
+
+/// The note a `MEMORY.md` line points to ([`pointer`]), when it is such a line.
+fn points_to(line: &str) -> Option<&str> {
+    let (_, note) = unmarked(line).trim_end().rsplit_once(" → ")?;
+    (files::valid_name(note) && note != files::MAIN).then_some(note)
+}
+
+/// Leaves a layer's `MEMORY.md` (`lines`) one line pointing to each note its moved lines went into ([`pointer`]):
+/// the run's summary of the topic, else what the note is about. A line already pointing to the note stays, unless
+/// the run summed the topic up anew and the user didn't write that line: it is then rewritten in place. A pointer
+/// that would fail `MEMORY.md`'s checks (no room, a line too long) gives way to the next, or is left out, as the
+/// index lists the note anyway, so it never costs the run its other changes. Returns the lines taken out and the
+/// texts added.
+pub(super) fn point(
+    snapshot: &Snapshot,
+    layer: &Layer,
+    moved: &[&MoveOut],
+    lines: &mut Vec<String>,
+) -> (Vec<String>, Vec<String>) {
+    let bot = snapshot.layer_bot(layer.shared);
+    let passes = |lines: &[String]| {
+        files::check_change(bot, files::MAIN, layer.content.as_deref(), &super::edits::joined(lines), false).is_ok()
+    };
+    let (mut removed, mut added) = (Vec::new(), Vec::new());
+    for (i, first) in moved.iter().enumerate() {
+        let note = first.file.as_str();
+        if moved[..i].iter().any(|m| m.file == note) {
+            continue;
+        }
+        let summary = moved[i..].iter().filter(|m| m.file == note).map(|m| m.summary.trim()).find(|s| !s.is_empty());
+        let Some(at) = lines.iter().position(|l| points_to(l) == Some(note)) else {
+            for summed in summary.map(str::to_owned).into_iter().chain(about(snapshot, first)) {
+                let text = pointer(&summed, note);
+                lines.push(format!("- {text}"));
+                if passes(lines) {
+                    added.push(text);
+                    break;
+                }
+                lines.pop();
+            }
+            continue;
+        };
+        let Some(text) = summary.map(|s| pointer(s, note)) else { continue };
+        let old = unmarked(&lines[at]);
+        if old == text || snapshot.fact(layer.shared, old).is_some_and(|f| f.author.is_users()) {
+            continue;
+        }
+        let was = std::mem::replace(&mut lines[at], format!("- {text}"));
+        if passes(lines) {
+            removed.push(was);
+            added.push(text);
+        } else {
+            lines[at] = was;
+        }
+    }
+    (removed, added)
+}
+
+/// What a note is about, best first: the move's description (a new note's), the note's own, its name.
+fn about(snapshot: &Snapshot, m: &MoveOut) -> Vec<String> {
+    let given = Some(m.description.trim().to_owned()).filter(|d| !d.is_empty());
+    let known = snapshot.note(m.shared, &m.file).and_then(|f| f.description.clone());
+    let name = m.file.trim_end_matches(".md").rsplit('/').next().map(str::to_owned);
+    [given, known, name].into_iter().flatten().collect()
 }
 
 /// Keeps the appends and moves the rules allow into `kept`, and says why the others were dropped.
@@ -49,8 +125,24 @@ pub(super) fn audit(
     kept: &mut Plan,
     rejected: &mut Vec<String>,
 ) {
+    // A plan may describe a new note once: every line it sends there shares that description.
+    let mut described: BTreeMap<(bool, String), String> = BTreeMap::new();
+    let named = appends.iter().map(|a| (a.shared, &a.file, &a.description));
+    for (shared, file, description) in named.chain(moves.iter().map(|m| (m.shared, &m.file, &m.description))) {
+        if !description.trim().is_empty() {
+            described.entry((shared && snapshot.shared, file.clone())).or_insert_with(|| description.trim().to_owned());
+        }
+    }
+    let describe = |shared: bool, file: &str, description: &mut String| {
+        if description.trim().is_empty()
+            && let Some(known) = described.get(&(shared, file.to_owned()))
+        {
+            description.clone_from(known);
+        }
+    };
     for mut append in appends {
         append.shared &= snapshot.shared;
+        describe(append.shared, &append.file, &mut append.description);
         let verdict = target(snapshot, append.shared, &append.file, &append.description)
             .and_then(|()| text(&append.text))
             .and_then(|()| cite(messages, &append.quote, &append.message).map(drop));
@@ -61,15 +153,21 @@ pub(super) fn audit(
     }
     for mut moved in moves {
         moved.shared &= snapshot.shared;
+        describe(moved.shared, &moved.file, &mut moved.description);
         let verdict = (|| {
             if !snapshot.full {
                 return Err("MEMORY.md isn't full");
             }
-            let fact = snapshot.fact(moved.shared, &moved.line).ok_or("no such line in MEMORY.md")?;
-            if fact.author.is_users() {
-                return Err("the user wrote it");
+            // Even a line the user wrote moves: word for word, into a note of the same layer.
+            snapshot.fact(moved.shared, &moved.line).ok_or("no such line in MEMORY.md")?;
+            if points_to(&moved.line).is_some() {
+                return Err("it points to a note");
             }
-            target(snapshot, moved.shared, &moved.file, &moved.description)
+            target(snapshot, moved.shared, &moved.file, &moved.description)?;
+            if moved.summary.trim().is_empty() {
+                return Ok(());
+            }
+            check::text(&pointer(&moved.summary, &moved.file)).map_err(check::Refusal::message)
         })();
         match verdict {
             Ok(()) => kept.move_out.push(moved),
@@ -81,11 +179,10 @@ pub(super) fn audit(
 /// A note name the folders take; a new note also needs a description that passes the checks.
 fn target(snapshot: &Snapshot, shared: bool, file: &str, description: &str) -> Result<(), &'static str> {
     if !files::valid_name(file) || file == files::MAIN {
-        return Err("the file name isn't lowercase-with-dashes.md");
+        return Err("the file name isn't lowercase-with-dashes.md, in up to three topic folders");
     }
-    let layer = snapshot.layer_bot(shared);
-    let exists = snapshot.files.iter().any(|f| f.name == file && f.bot.as_deref() == layer);
-    if !exists && (description.trim().is_empty() || check::content(description).is_err()) {
+    if snapshot.note(shared, file).is_none() && (description.trim().is_empty() || check::content(description).is_err())
+    {
         return Err("a new note needs a description");
     }
     Ok(())
@@ -142,7 +239,7 @@ pub(super) fn edits(conn: &Connection, snapshot: &Snapshot, plan: &Plan, message
             after.push_str(&line);
             after.push('\n');
         }
-        match files::check_change(bot.as_deref(), &name, before.as_deref(), &after) {
+        match files::check_change(bot.as_deref(), &name, before.as_deref(), &after, false) {
             Ok(()) => {
                 let into = |m: &&MoveOut| snapshot.layer_bot(m.shared) == bot.as_deref() && m.file == name;
                 out.moved.extend(plan.move_out.iter().filter(into).cloned());

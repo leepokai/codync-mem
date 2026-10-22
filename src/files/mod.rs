@@ -25,10 +25,12 @@ use crate::tokens;
 pub const MAIN: &str = "MEMORY.md";
 /// The most one note may hold, in estimated tokens.
 pub const FILE_CAP: usize = 2_000;
-/// The most files one folder may hold.
+/// The most notes one layer may hold, its topic folders included.
 pub const FOLDER_CAP: usize = 20;
-/// The longest file name, `.md` included.
-const NAME_MAX: usize = 64;
+/// The longest note name, its folders and `.md` included.
+const NAME_MAX: usize = 128;
+/// The most topic folders a note may sit in, one inside the other.
+pub const DEPTH_MAX: usize = 3;
 
 /// Who made a version, or wrote a fact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -44,7 +46,8 @@ pub enum Author {
 }
 
 impl Author {
-    /// The user wrote it: in Codync, or in a file on the computer. Dreaming leaves it as it is.
+    /// The user wrote it: in Codync, or in a file on the computer. Dreaming never takes it out or rewrites it;
+    /// tidying may move it word for word into a note.
     pub fn is_users(self) -> bool {
         matches!(self, Self::User | Self::Computer)
     }
@@ -116,14 +119,24 @@ pub struct Change<'a> {
     pub size: u64,
 }
 
-/// `MEMORY.md`, or a note: a lowercase ASCII slug, one level deep, since Unicode and case variants of a name would
-/// become duplicate notes.
+/// `MEMORY.md` at the top, or a note: a lowercase ASCII slug, in up to [`DEPTH_MAX`] topic folders named the same
+/// way (`health/allergies.md`), since Unicode and case variants of a name would become duplicate notes.
 pub fn valid_name(name: &str) -> bool {
     name == MAIN
         || name.len() <= NAME_MAX
-            && name.strip_suffix(".md").is_some_and(|stem| {
-                !stem.is_empty() && stem.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            && name.strip_suffix(".md").is_some_and(|stem| match stem.rsplit_once('/') {
+                Some((folder, leaf)) => valid_folder(folder) && slug(leaf),
+                None => slug(stem),
             })
+}
+
+/// A topic folder a note may sit in (`health`, `health/food`): up to [`DEPTH_MAX`] slugs, one inside the other.
+pub fn valid_folder(path: &str) -> bool {
+    path.split('/').count() <= DEPTH_MAX && path.split('/').all(slug)
+}
+
+fn slug(part: &str) -> bool {
+    !part.is_empty() && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 /// The most a layer's `MEMORY.md` may hold (`bot`: `None` for the shared one), in estimated tokens.
@@ -165,11 +178,14 @@ fn frontmatter(content: &str) -> Option<&str> {
 /// brings in: what memory may say, and the caps. Lines the file had aren't checked again, and a file over its cap
 /// may still shrink, so a line the user wrote never blocks the bot's changes around it. `MEMORY.md` holds one short
 /// fact per line within its layer's cap (it may be empty); a note needs the description its index line comes from.
+/// In a turn the user started in the bot's own chat (`asked`), `MEMORY.md` may grow to twice its cap, so what the
+/// user asks to remember is never turned away for space: dreaming then moves its detail out into notes.
 pub fn check_change(
     bot: Option<&str>,
     name: &str,
     before: Option<&str>,
     after: &str,
+    asked: bool,
 ) -> std::result::Result<(), Refusal> {
     let new = facts::gained(before, Some(after));
     for line in &new {
@@ -182,7 +198,8 @@ pub fn check_change(
         if new.iter().filter(|line| !line.starts_with('#')).any(long) {
             return Err(Refusal::TooLong);
         }
-        if grows && size > cap(bot) {
+        // ponytail: twice the cap bounds the opening when dreaming falls behind; past it, the bot writes a note.
+        if grows && size > cap(bot) * if asked { 2 } else { 1 } {
             return Err(Refusal::Full);
         }
         return Ok(());

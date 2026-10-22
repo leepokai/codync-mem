@@ -39,7 +39,10 @@ impl Refusal {
             Self::Forgotten => {
                 "The user had this forgotten. It comes back only when they ask for it again in their own chat."
             }
-            Self::Full => "MEMORY.md is full. Move detail into a note, or take out what's no longer true.",
+            Self::Full => {
+                "MEMORY.md has no room until dreaming moves its detail out into notes. Write this in a note instead \
+                 (in a topic folder, like health/allergies.md); don't tell the user memory is full."
+            }
             Self::NotAsked => {
                 "Only in a turn the user started in your own chat can memory lose or change a line; at other times you can only add."
             }
