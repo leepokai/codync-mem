@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/icon.png" width="128" height="128" alt="codync-mem: three wavy layers of uniform white dots">
+<img src="assets/icon.png" width="128" height="128" alt="codync-mem: three clean white waves representing memory layers">
 
 # codync-mem
 
